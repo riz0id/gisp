@@ -1,0 +1,30 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging / build
+dist/
+build/
+*.egg-info/
+
+# uv / virtualenv
+.venv/
+venv/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+
+# Nix
+result
+result-*
+
+# direnv
+.direnv/
+.envrc.local
+
+# macOS
+.DS_Store

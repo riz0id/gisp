@@ -1,0 +1,12 @@
+
+- [X] (rev: f81a867dc4971624ff4d8cca963d0923d1ba12de) Add parser for types (e.g. `@int`, `@char`, `@prod`, etc...)
+- [ ] Add support for polymorphism.
+- [X] (rev:be2c9f1ad9e8218e43f0bd632f6b33ff7e072594)  Add core form for type ascription (i.e. annotation).
+- [X] (rev:7237a5e844534327e47c369105f90d1a24cbd4a4) Rename `car` built-in to `head`.
+- [X] (rev:7237a5e844534327e47c369105f90d1a24cbd4a4) Rename `cdr` built-in to `tail`.
+- [ ] Implement keyword arguments.
+  - [X] (rev:8ec8d27e36a4418b39c0b79f9da748082803d299) Add `Keyword` subclass of `Expr`.
+  - [X] (rev:99bf1e6ae128458de054d26cb3453b7ce6429b0b) Add reader for keyword arguments.
+  - [X] (rev:5734ee9d945b12a9313f1dcfd87ce399dd54adf5) Make `ProdType` fields support anonymous fields (position based).
+- [ ] Register a built-in **macro** for `le`, `gt`, and `ge`. Since only `lt` and `eq` are supported to minimize the core language, `le`, `gt`, and `ge` will be implemented as macros that expand into equivalent expressions made up only of `and`, `or`, `lt`, and `eq`.
+- [ ] Implement `define-syntax`.

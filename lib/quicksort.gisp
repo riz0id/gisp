@@ -1,0 +1,30 @@
+(define append
+  (lambda (xs ys)
+    (if (eq xs '())
+        ys
+        (. (head xs) (append (tail xs) ys)))))
+
+(define keep-le
+  (lambda (p xs)
+    (if (eq xs '())
+        xs
+        (if (le (head xs) p)
+            (. (head xs) (keep-le p (tail xs)))
+            (keep-le p (tail xs))))))
+
+(define keep-gt
+  (lambda (p xs)
+    (if (eq xs '())
+        xs
+        (if (le (head xs) p)
+            (keep-gt p (tail xs))
+            (. (head xs) (keep-gt p (tail xs)))))))
+
+(define sort
+  (lambda (xs)
+    (if (le (len xs) 1)
+        xs
+        (append (sort (keep-le (head xs) (tail xs)))
+                (. (head xs) (sort (keep-gt (head xs) (tail xs))))))))
+
+(sort '(3 1 4 1 5 9 2 6))
