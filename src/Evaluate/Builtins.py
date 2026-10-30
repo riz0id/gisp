@@ -12,13 +12,17 @@ from Syntax import (
     Value,
     as_data,
     as_syntax,
-    boolean as boolean_value,
     consed,
     elements,
     listed,
-    product as product_value,
     spread,
     unit,
+)
+from Syntax import (
+    boolean as boolean_value,
+)
+from Syntax import (
+    product as product_value,
 )
 from Syntax.Value import Primitive
 

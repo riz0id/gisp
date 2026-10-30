@@ -5,6 +5,7 @@ from Analysis import (
     Guard,
     OccurrenceError,
     arms,
+    coverages,
     opaque,
     path_conditions,
     refinements,
@@ -12,6 +13,7 @@ from Analysis import (
 )
 from Analysis.CExpr import CExprError
 from Analysis.Path import Path
+from Analysis.PatternCoverage import Coverage, CoverageError
 from Analysis.Support import Support
 from Evaluate import BUILTINS, Environment, EvalError, evaluate_toplevel
 from Expander import ExpandError, ParseError, expand, parse
@@ -26,8 +28,12 @@ from TypeCheck import ElaborateError, TypeChecker, TypeCheckError, check_topleve
 # alone: an identifier with two candidate binders is refused by `resolve`
 # itself, and reaches this far from both the parse phase and the type checker.
 #
-# The last two are the analysis phase's, which only `--analyse` runs: a report
+# The last three are the analysis phase's, which only `--analyse` runs: a report
 # is worth no more than an evaluation is when a phase refuses the program.
+# `CoverageError` cannot be raised from here, because the type checker refuses
+# an incomplete `match` first — it is the analysis stating its own precondition,
+# and it is listed so that a caller who reaches the analysis another way is
+# reported about in the same words.
 INTERPRETER_ERRORS = (
     ReadError,
     ExpandError,
@@ -38,6 +44,7 @@ INTERPRETER_ERRORS = (
     EvalError,
     OccurrenceError,
     CExprError,
+    CoverageError,
 )
 
 
@@ -129,6 +136,27 @@ def report_arm(
         print(f"      {variable} takes {narrowed}")
 
 
+def report_coverage(path: Path, verdict: Coverage | None) -> None:
+    # One `match`: whether its clauses leave a value unmatched, and the pattern
+    # that one would be written as.
+    #
+    # Said of the form and not of a clause, which is what distinguishes it from
+    # the arm lines below: those answer whether a clause is reached, and this
+    # answers whether the clauses between them cover the type.
+    #
+    # The type is not named here. It would be the whole of a `(@list @int)`
+    # written out, which is a line long, and the witness names the constructor
+    # it is about already.
+    if verdict is None:
+        # Coverage declined the question: the scrutinee's type cannot be read,
+        # or a clause's pattern is not one for it.
+        print(f"  match at {path}: coverage unknown")
+    elif verdict.complete():
+        print(f"  match at {path}: complete")
+    else:
+        print(f"  match at {path}: leaves {verdict.witness} unmatched")
+
+
 def report_analysis(source: str, store: Context) -> None:
     for index, (program, table) in enumerate(analysed(source, store)):
         free: list[Symbol] = opaque(program, table)
@@ -141,6 +169,9 @@ def report_analysis(source: str, store: Context) -> None:
                 "  free variables: "
                 + ", ".join(f"{variable} : {store[variable]}" for variable in free)
             )
+
+        for path, verdict in coverages(program, table, store):
+            report_coverage(path, verdict)
 
         if not branches:
             # Said rather than left blank: a form with no `match` in it is one

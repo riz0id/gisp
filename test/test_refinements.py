@@ -71,7 +71,9 @@ def context(ascriptions: dict[Symbol, Type] | None = None) -> Context:
 
 
 def test_a_consequent_use_keeps_the_values_below_the_bound():
-    program, table = program_of("(lambda (x) (match (lt x 5) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (x) (match (lt x 5) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     x = var("x", 0)
 
     # The series opens on the ground range of the type and ends on the support
@@ -83,13 +85,15 @@ def test_a_consequent_use_keeps_the_values_below_the_bound():
 
 
 def test_an_alternative_use_keeps_the_complement():
-    program, table = program_of("(lambda (x) (match (lt x 5) ((#t) 0) ((#f) x)))")
+    program, table = program_of(
+        "(lambda (x) (match (lt x 5) ((#t (prod#)) 0) ((#f (prod#)) x)))"
+    )
     x = var("x", 0)
 
     # Three entries and not two. Reaching the second clause commits to the
-    # `(#t)` pattern having failed *and* to `(#f)` having matched, so the fold
-    # takes two steps — and the two read to the same support, which is why the
-    # last entry is the one the `if` reading gave.
+    # `(#t (prod#))` pattern having failed *and* to `(#f (prod#))` having
+    # matched, so the fold takes two steps — and the two read to the same
+    # support, which is why the last entry is the one the `if` reading gave.
     assert refinements(x, Path([2, 3, 1]), program, table, context()) == [
         Support.integers(),
         Support.of([(5, UPPER)]),
@@ -98,7 +102,9 @@ def test_an_alternative_use_keeps_the_complement():
 
 
 def test_a_failed_equality_punches_a_hole():
-    program, table = program_of("(lambda (x) (match (eq x 1) ((#t) 0) ((#f) x)))")
+    program, table = program_of(
+        "(lambda (x) (match (eq x 1) ((#t (prod#)) 0) ((#f (prod#)) x)))"
+    )
     x = var("x", 0)
 
     # The alternative knows exactly one value is impossible, so the support is
@@ -112,8 +118,8 @@ def test_nested_guards_tighten_one_per_step():
     program, table = program_of(
         "(lambda (x)"
         " (match (lt x 10)"
-        "   ((#t) (match (lt 5 x) ((#t) x) ((#f) 0)))"
-        "   ((#f) 0)))"
+        "   ((#t (prod#)) (match (lt 5 x) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+        "   ((#f (prod#)) 0)))"
     )
     x = var("x", 0)
 
@@ -125,7 +131,9 @@ def test_nested_guards_tighten_one_per_step():
 
 
 def test_negation_flips_the_polarity_of_its_operand():
-    program, table = program_of("(lambda (x) (match (not (lt x 5)) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (x) (match (not (lt x 5)) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     x = var("x", 0)
 
     assert refinements(x, Path([2, 2]), program, table, context()) == [
@@ -136,7 +144,8 @@ def test_negation_flips_the_polarity_of_its_operand():
 
 def test_a_conjunction_intersects_and_its_failure_unions():
     program, table = program_of(
-        "(lambda (x) (match (and (lt 0 x) (lt x 10)) ((#t) x) ((#f) x)))"
+        "(lambda (x)"
+        " (match (and (lt 0 x) (lt x 10)) ((#t (prod#)) x) ((#f (prod#)) x)))"
     )
     x = var("x", 0)
 
@@ -154,7 +163,7 @@ def test_a_conjunction_intersects_and_its_failure_unions():
 
 def test_a_failed_disjunction_intersects_the_negations():
     program, table = program_of(
-        "(lambda (x) (match (or (lt x 0) (lt 10 x)) ((#t) 0) ((#f) x)))"
+        "(lambda (x) (match (or (lt x 0) (lt 10 x)) ((#t (prod#)) 0) ((#f (prod#)) x)))"
     )
     x = var("x", 0)
 
@@ -166,12 +175,16 @@ def test_a_failed_disjunction_intersects_the_negations():
 def test_le_is_read_as_the_disjunction_of_lt_and_eq():
     # `le` has no condition constructor, so its guards arrive as applications;
     # the walk rewrites `(le a b)` to `(or (lt a b) (eq a b))` and reads that.
-    program, table = program_of("(lambda (x) (match (le x 5) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (x) (match (le x 5) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     series = refinements(var("x", 0), Path([2, 2]), program, table, context())
     assert series[-1] == Support.of([(LOWER, 5)])
 
     # The mirrored order rewrites too: failing `5 <= x` is exactly `x < 5`.
-    program, table = program_of("(lambda (x) (match (le 5 x) ((#t) 0) ((#f) x)))")
+    program, table = program_of(
+        "(lambda (x) (match (le 5 x) ((#t (prod#)) 0) ((#f (prod#)) x)))"
+    )
     series = refinements(var("x", 0), Path([2, 3]), program, table, context())
     assert series[-1] == Support.of([(LOWER, 4)])
 
@@ -179,7 +192,9 @@ def test_le_is_read_as_the_disjunction_of_lt_and_eq():
 def test_a_shadowed_relation_is_an_application_and_does_not_refine():
     # This `le` is a parameter, not the built-in, so the guard says nothing a
     # sound reading can use.
-    program, table = program_of("(lambda (le x) (match (le x 5) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (le x) (match (le x 5) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     x = var("x", 0)
 
     assert refinements(x, Path([2, 2]), program, table, context()) == [
@@ -189,7 +204,9 @@ def test_a_shadowed_relation_is_an_application_and_does_not_refine():
 
 
 def test_a_guard_over_another_variable_does_not_refine():
-    program, table = program_of("(lambda (x y) (match (lt y 5) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (x y) (match (lt y 5) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     x = var("x", 0)
 
     assert refinements(x, Path([2, 2]), program, table, context()) == [
@@ -202,7 +219,7 @@ def test_an_opaque_test_does_not_refine():
     # `(mod x 3)` is an application inside the equality, so the walk cannot
     # read the test as a bound on `x` and must not pretend to.
     program, table = program_of(
-        "(lambda (x) (match (eq (mod x 3) 0) ((#t) x) ((#f) 0)))"
+        "(lambda (x) (match (eq (mod x 3) 0) ((#t (prod#)) x) ((#f (prod#)) 0)))"
     )
     x = var("x", 0)
 
@@ -216,8 +233,8 @@ def test_contradictory_guards_empty_the_support():
     program, table = program_of(
         "(lambda (x)"
         " (match (lt x 5)"
-        "   ((#t) (match (lt 9 x) ((#t) x) ((#f) 0)))"
-        "   ((#f) 0)))"
+        "   ((#t (prod#)) (match (lt 9 x) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+        "   ((#f (prod#)) 0)))"
     )
     x = var("x", 0)
 
@@ -233,7 +250,9 @@ def test_contradictory_guards_empty_the_support():
 def test_a_boolean_test_is_a_symbol_and_does_not_refine():
     # `#f` reads as a symbol, not a literal: the walk sees a variable it knows
     # nothing about and must not read any truth into it.
-    program, table = program_of("(lambda (x) (match #f ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (x) (match #f ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     x = var("x", 0)
 
     assert refinements(x, Path([2, 2]), program, table, context()) == [
@@ -248,7 +267,9 @@ def test_a_boolean_test_is_a_symbol_and_does_not_refine():
 def test_an_integer_compared_to_a_boolean_empties_the_consequent():
     # `#t` reads as an ordinary symbol, so the ascription the default context
     # gives it is the only thing that makes this guard a type mismatch.
-    program, table = program_of("(lambda (x) (match (eq x #t) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (x) (match (eq x #t) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     x = var("x", 0)
     ascribed = context({x: IntType()})
 
@@ -266,7 +287,9 @@ def test_an_integer_compared_to_a_boolean_empties_the_consequent():
 
 
 def test_a_character_never_equals_an_integer():
-    program, table = program_of(r"(lambda (x) (match (eq x #\a) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        r"(lambda (x) (match (eq x #\a) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     x = var("x", 0)
 
     series = refinements(x, Path([2, 2]), program, table, context({x: IntType()}))
@@ -277,7 +300,7 @@ def test_an_arithmetic_result_compared_to_a_boolean_empties_the_consequent():
     # The operand is an application, typed by the return of the ascription its
     # head carries in the default context.
     program, table = program_of(
-        "(lambda (x) (match (eq (+ x 1) #t) ((#t) x) ((#f) 0)))"
+        "(lambda (x) (match (eq (+ x 1) #t) ((#t (prod#)) x) ((#f (prod#)) 0)))"
     )
     x = var("x", 0)
 
@@ -289,7 +312,7 @@ def test_a_comparison_compared_to_an_integer_empties_the_consequent():
     # No ascription is needed at all here: a comparison answers with a boolean
     # whatever it compares.
     program, table = program_of(
-        "(lambda (x) (match (eq (lt x 0) 1) ((#t) x) ((#f) 0)))"
+        "(lambda (x) (match (eq (lt x 0) 1) ((#t (prod#)) x) ((#f (prod#)) 0)))"
     )
     x = var("x", 0)
 
@@ -300,7 +323,9 @@ def test_a_comparison_compared_to_an_integer_empties_the_consequent():
 def test_operands_of_the_same_type_still_refine_by_value():
     # The disjointness reading sits in front of the point reading, so a guard
     # it declines must still arrive there.
-    program, table = program_of("(lambda (x) (match (eq x 1) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (x) (match (eq x 1) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     x = var("x", 0)
 
     assert refinements(x, Path([2, 2]), program, table, context({x: IntType()})) == [
@@ -310,7 +335,9 @@ def test_operands_of_the_same_type_still_refine_by_value():
 
 
 def test_an_unascribed_operand_eliminates_nothing():
-    program, table = program_of("(lambda (x y) (match (eq x y) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (x y) (match (eq x y) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     x = var("x", 0)
 
     series = refinements(x, Path([2, 2]), program, table, context({x: IntType()}))
@@ -318,7 +345,9 @@ def test_an_unascribed_operand_eliminates_nothing():
 
 
 def test_a_context_that_ascribes_nothing_eliminates_nothing():
-    program, table = program_of("(lambda (x) (match (eq x #t) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (x) (match (eq x #t) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     x = var("x", 0)
 
     assert refinements(x, Path([2, 2]), program, table, context()) == [
@@ -329,7 +358,7 @@ def test_a_context_that_ascribes_nothing_eliminates_nothing():
 
 def test_a_disjoint_equality_under_a_negation_is_always_true():
     program, table = program_of(
-        "(lambda (x) (match (not (eq x #t)) ((#t) x) ((#f) 0)))"
+        "(lambda (x) (match (not (eq x #t)) ((#t (prod#)) x) ((#f (prod#)) 0)))"
     )
     x = var("x", 0)
     ascribed = context({x: IntType()})
@@ -343,7 +372,7 @@ def test_a_disjoint_equality_under_a_negation_is_always_true():
 def test_a_disjoint_disjunct_drops_out_of_the_disjunction():
     # `(or #f r)` is `r`, so the live disjunct is the whole reading.
     program, table = program_of(
-        "(lambda (x) (match (or (eq x #t) (lt x 5)) ((#t) x) ((#f) 0)))"
+        "(lambda (x) (match (or (eq x #t) (lt x 5)) ((#t (prod#)) x) ((#f (prod#)) 0)))"
     )
     x = var("x", 0)
 
@@ -353,7 +382,8 @@ def test_a_disjoint_disjunct_drops_out_of_the_disjunction():
 
 def test_a_disjoint_conjunct_empties_the_conjunction():
     program, table = program_of(
-        "(lambda (x) (match (and (eq x #t) (lt x 5)) ((#t) x) ((#f) 0)))"
+        "(lambda (x)"
+        " (match (and (eq x #t) (lt x 5)) ((#t (prod#)) x) ((#f (prod#)) 0)))"
     )
     x = var("x", 0)
     ascribed = context({x: IntType()})
@@ -369,7 +399,9 @@ def test_a_disjoint_equality_under_le_says_nothing():
     # statically false — but `le` *raises* on a boolean rather than answering
     # `#f`, so neither branch may be called dead. The opaque `lt` half is what
     # keeps the union honest.
-    program, table = program_of("(lambda (x) (match (le x #t) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (x) (match (le x #t) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     x = var("x", 0)
     ascribed = context({x: IntType()})
 
@@ -384,7 +416,9 @@ def test_a_disjoint_equality_under_le_says_nothing():
 def test_a_shadowed_eq_is_an_application_and_eliminates_nothing():
     # This `eq` is a parameter, not the built-in, so the guard converts to an
     # application and no reading of it is available at all.
-    program, table = program_of("(lambda (eq x) (match (eq x #t) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (eq x) (match (eq x #t) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     x = var("x", 0)
 
     series = refinements(x, Path([2, 2]), program, table, context({x: IntType()}))
@@ -397,7 +431,7 @@ def test_a_constructor_identifier_is_not_read_through_an_ascription():
     # the ascription instead would call this branch dead on the strength of an
     # ascription that does not describe the operand.
     program, table = program_of(
-        "(lambda (x) (match (eq (cons x) #t) ((#t) x) ((#f) 0)))"
+        "(lambda (x) (match (eq (cons x) #t) ((#t (prod#)) x) ((#f (prod#)) 0)))"
     )
     x = var("x", 0)
     ascribed = context(
@@ -418,7 +452,9 @@ def test_a_constructor_identifier_is_not_read_through_an_ascription():
 
 
 def test_a_type_mismatched_guard_makes_its_consequent_unreachable():
-    program, table = program_of("(lambda (x) (match (eq x #t) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (x) (match (eq x #t) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     ascribed = context({var("x", 0): IntType()})
 
     assert unreachable(Path([2, 2]), program, table, ascribed)
@@ -432,8 +468,8 @@ def test_a_bound_on_one_variable_does_not_make_a_branch_unreachable():
     program, table = program_of(
         "(lambda (x)"
         " (match (lt x 5)"
-        "   ((#t) (match (lt 9 x) ((#t) x) ((#f) 0)))"
-        "   ((#f) 0)))"
+        "   ((#t (prod#)) (match (lt 9 x) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+        "   ((#f (prod#)) 0)))"
     )
 
     arm = Path([2, 2, 1, 2, 1])
@@ -583,8 +619,8 @@ def test_a_free_variable_opens_on_the_whole_range_of_its_type():
 def test_a_guard_on_a_free_variable_refines_it():
     program, table = program_of(
         "(match (lt (forall (ascribe# n @int)) 5)"
-        "  ((#t) (forall (ascribe# n @int)))"
-        "  ((#f) 0))"
+        "  ((#t (prod#)) (forall (ascribe# n @int)))"
+        "  ((#f (prod#)) 0))"
     )
 
     assert refinements(Symbol("n"), Path([2, 1]), program, table, context()) == [
@@ -602,8 +638,11 @@ def test_literal_bounds_on_a_free_variable_can_empty_its_support():
     # records.
     source = (
         "(match (lt (forall (ascribe# n @int)) 0)"
-        "  ((#t) (match (lt 9 (forall (ascribe# n @int))) ((#t) 1) ((#f) 2)))"
-        "  ((#f) 3))"
+        "  ((#t (prod#))"
+        "   (match (lt 9 (forall (ascribe# n @int)))"
+        "     ((#t (prod#)) 1)"
+        "     ((#f (prod#)) 2)))"
+        "  ((#f (prod#)) 3))"
     )
     program, table = program_of(source)
     free = Symbol("n")
@@ -629,7 +668,7 @@ def test_a_free_variable_needs_no_ascription_from_the_caller():
     # a `forall` on sight, so the walk reads the store the checker filled
     # rather than one asserted here.
     program, table = program_of(
-        "(match (lt (forall (ascribe# n @int)) 5) ((#t) 1) ((#f) 0))"
+        "(match (lt (forall (ascribe# n @int)) 5) ((#t (prod#)) 1) ((#f (prod#)) 0))"
     )
     store = Context.default()
 
@@ -645,8 +684,8 @@ def test_a_free_variable_needs_no_ascription_from_the_caller():
 def test_the_free_variables_of_a_program_are_answered_once_each():
     source = (
         "(match (lt (forall (ascribe# n @int)) (forall (ascribe# m @int)))"
-        "  ((#t) (forall (ascribe# n @int)))"
-        "  ((#f) 0))"
+        "  ((#t (prod#)) (forall (ascribe# n @int)))"
+        "  ((#f (prod#)) 0))"
     )
     program, table = program_of(source)
 
@@ -708,8 +747,8 @@ def test_a_list_pattern_states_a_shape_and_so_refines_no_integer():
     # list's shape has nothing to say about one — which is what a list domain
     # would change, and nothing here pretends otherwise.
     program, table = program_of(
-        "(match xs ((nil) (forall (ascribe# n @int)))"
-        " ((cons y ys) (forall (ascribe# n @int))))"
+        "(match xs ((nil (prod#)) (forall (ascribe# n @int)))"
+        " ((cons (prod# y ys)) (forall (ascribe# n @int))))"
     )
 
     for arm in (Path([2, 1]), Path([3, 1])):

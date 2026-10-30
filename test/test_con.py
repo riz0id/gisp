@@ -9,7 +9,6 @@ from Syntax import (
     SList,
     SumConExpr,
     Symbol,
-    TupleConExpr,
     as_data,
     as_syntax,
     boolean,
@@ -20,7 +19,7 @@ from Syntax import (
     unit,
 )
 from Syntax.Type import IntType, ProdType
-from TypeCheck.Patterns import payload_fields
+from TypeCheck.Patterns import product_fields
 
 X = Symbol("x")
 XS = Symbol("xs")
@@ -61,14 +60,14 @@ def test_the_nullary_product_is_the_empty_tuple():
         RecordConExpr({})
 
 
-# -- spreading a payload ---------------------------------------------------------
+# -- reading a product -----------------------------------------------------------
 
 
-def test_spread_reads_a_payload_as_payload_fields_reads_its_type():
-    # The two are one rule over the two sides, which is what makes `(#t)` take
-    # no operands, `(cons x xs)` take two, and a constructor over a bare
-    # `@int` take one.
-    payloads = [
+def test_spread_reads_a_product_as_product_fields_reads_its_type():
+    # The two are one rule over the two sides: a product is read as its
+    # fields, and anything else as the one value it is. What a constructor
+    # pattern is written with is `operand_types`, and not this.
+    products = [
         (unit(), ProdType()),
         (product([Integer(1), Integer(2)]), ProdType([IntType(), IntType()])),
         (
@@ -78,8 +77,8 @@ def test_spread_reads_a_payload_as_payload_fields_reads_its_type():
         (Integer(1), IntType()),
     ]
 
-    for value, ty in payloads:
-        assert len(spread(value)) == len(payload_fields(ty))
+    for value, ty in products:
+        assert len(spread(value)) == len(product_fields(ty))
 
 
 # -- lists -----------------------------------------------------------------------
@@ -104,9 +103,7 @@ def test_a_cell_whose_payload_is_a_record_is_still_a_list():
     # `elements` reads a cell through `spread`, so it does not care which
     # product shape the payload is — which is what leaves a record-payloaded
     # cell readable if one is ever built.
-    cell = SumConExpr(
-        Symbol("cons"), RecordConExpr({X: Integer(1), XS: listed([])})
-    )
+    cell = SumConExpr(Symbol("cons"), RecordConExpr({X: Integer(1), XS: listed([])}))
 
     assert elements(cell) == [Integer(1)]
 
@@ -145,7 +142,9 @@ def test_a_construction_prints_as_itself_where_no_notation_reads_it_back():
     assert str(product([Integer(1), Integer(2)])) == "(prod# 1 2)"
     assert str(boolean(True)) == "(#t (prod#))"
     assert str(boolean(False)) == "(#f (prod#))"
-    assert str(RecordConExpr({X: Integer(1), XS: unit()})) == "(prod# (x 1) (xs (prod#)))"
+    assert (
+        str(RecordConExpr({X: Integer(1), XS: unit()})) == "(prod# (x 1) (xs (prod#)))"
+    )
 
 
 def test_a_list_prints_in_the_notation_the_reader_has_for_one():

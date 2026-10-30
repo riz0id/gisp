@@ -123,7 +123,9 @@ def test_len_counts_top_level_items():
 
 
 def test_predicates_drive_a_match():
-    source = "(match (le (head '(1 2)) (len '(a b))) ((#t) 'yes) ((#f) 'no))"
+    source = (
+        "(match (le (head '(1 2)) (len '(a b))) ((#t (prod#)) 'yes) ((#f (prod#)) 'no))"
+    )
 
     assert run(source) == Symbol("yes")
 

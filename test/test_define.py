@@ -25,8 +25,8 @@ def test_a_defined_procedure_is_self_recursive():
     source = """
     (define last (lambda (xs)
                    (match xs
-                     ((cons x (nil)) x)
-                     ((cons x rest) (last rest)))))
+                     ((cons (prod# x (nil (prod#)))) x)
+                     ((cons (prod# x rest)) (last rest)))))
     (last '(1 2 3))
     """
     assert run(source) == Integer(3)

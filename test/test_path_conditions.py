@@ -37,24 +37,26 @@ def lt(left, right) -> ComparisonCExpr:
     return ComparisonCExpr(left, right)
 
 
-# The two patterns an `if` expands to. A clause is named by its pattern, so
-# these are what `path_conditions` reports a boolean guard against.
-TRUE_PATTERN = SList([Symbol("#t")])
-FALSE_PATTERN = SList([Symbol("#f")])
+# The two patterns a boolean `match` is written with. A clause is named by its
+# pattern, so these are what `path_conditions` reports a boolean guard against
+# — and each carries the empty product its constructor does, as the pattern for
+# a constructor is written the way the construction is.
+TRUE_PATTERN = SList([Symbol("#t"), SList([Symbol("prod#")])])
+FALSE_PATTERN = SList([Symbol("#f"), SList([Symbol("prod#")])])
 
 
 def consequent_of(test) -> list[Guard]:
-    # The guards of the clause an `if`'s consequent became: the `(#t)` pattern
-    # matched, which is the polarity the consequent's position carried.
+    # The guards of the clause an `if`'s consequent became: the `(#t (prod#))`
+    # pattern matched, which is the polarity the consequent's position carried.
     return [Guard(test=test, pattern=TRUE_PATTERN, consequent=True)]
 
 
 def alternative_of(test) -> list[Guard]:
     # The guards of the clause an `if`'s alternative became. Two, because
-    # reaching the second clause commits to both halves: `(#t)` was tried and
-    # failed, and then `(#f)` matched. They read to the same support, so the
-    # second is redundant — and stating it is what keeps the walk faithful to a
-    # `match` of any width, where it is not.
+    # reaching the second clause commits to both halves: `(#t (prod#))` was
+    # tried and failed, and then `(#f (prod#))` matched. They read to the same
+    # support, so the second is redundant — and stating it is what keeps the walk
+    # faithful to a `match` of any width, where it is not.
     return [
         Guard(test=test, pattern=TRUE_PATTERN, consequent=False),
         Guard(test=test, pattern=FALSE_PATTERN, consequent=True),
@@ -67,8 +69,8 @@ def alternative_of(test) -> list[Guard]:
 def test_sibling_ifs_give_one_list_but_four_distinct_occurrences():
     program, table = program_of(
         "(lambda (f x)"
-        " (f (match (lt x 5) ((#t) x) ((#f) 0))"
-        "    (match (lt 5 x) ((#t) x) ((#f) 0))))"
+        " (f (match (lt x 5) ((#t (prod#)) x) ((#f (prod#)) 0))"
+        "    (match (lt 5 x) ((#t (prod#)) x) ((#f (prod#)) 0))))"
     )
     x = var("x", 0)
 
@@ -96,8 +98,8 @@ def test_sibling_ifs_give_one_list_but_four_distinct_occurrences():
 def test_conjoining_the_flat_list_is_unsatisfiable_where_no_occurrence_is():
     program, table = program_of(
         "(lambda (f x)"
-        " (f (match (lt x 5) ((#t) x) ((#f) 0))"
-        "    (match (lt 5 x) ((#t) x) ((#f) 0))))"
+        " (f (match (lt x 5) ((#t (prod#)) x) ((#f (prod#)) 0))"
+        "    (match (lt 5 x) ((#t (prod#)) x) ((#f (prod#)) 0))))"
     )
     x = var("x", 0)
 
@@ -116,7 +118,9 @@ def test_conjoining_the_flat_list_is_unsatisfiable_where_no_occurrence_is():
 
 
 def test_a_guard_that_does_not_mention_the_variable_is_still_a_guard():
-    program, table = program_of("(lambda (x y) (match (lt y 5) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (x y) (match (lt y 5) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
     x = var("x", 0)
 
     # The test never names `x`, so the harvest reports nothing for it.
@@ -131,7 +135,9 @@ def test_a_guard_that_does_not_mention_the_variable_is_still_a_guard():
 
 
 def test_an_occurrence_in_the_alternative_carries_the_opposite_polarity():
-    program, table = program_of("(lambda (x) (match (lt x 5) ((#t) 0) ((#f) x)))")
+    program, table = program_of(
+        "(lambda (x) (match (lt x 5) ((#t (prod#)) 0) ((#f (prod#)) x)))"
+    )
     x = var("x", 0)
 
     below = lt(VarCExpr(x), IntegerCExpr(Integer(5)))
@@ -145,7 +151,10 @@ def test_an_occurrence_in_the_alternative_carries_the_opposite_polarity():
 
 def test_a_scrutinee_region_is_not_a_guard():
     program, table = program_of(
-        "(lambda (x) (match (match (lt x 5) ((#t) 1) ((#f) 2)) ((#t) 3) ((#f) x)))"
+        "(lambda (x)"
+        " (match (match (lt x 5) ((#t (prod#)) 1) ((#f (prod#)) 2))"
+        "   ((#t (prod#)) 3)"
+        "   ((#f (prod#)) x)))"
     )
     x = var("x", 0)
 
@@ -168,8 +177,8 @@ def test_nested_ifs_tighten_along_the_path():
     program, table = program_of(
         "(lambda (x)"
         " (match (lt x 10)"
-        "   ((#t) (match (lt 5 x) ((#t) x) ((#f) 0)))"
-        "   ((#f) 0)))"
+        "   ((#t (prod#)) (match (lt 5 x) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+        "   ((#f (prod#)) 0)))"
     )
     x = var("x", 0)
 
@@ -194,7 +203,7 @@ def test_nested_ifs_tighten_along_the_path():
 
 def test_a_letrec_initializer_is_walked_as_a_region():
     program, table = program_of(
-        "(letrec ((y 1) (x (match (lt y 5) ((#t) y) ((#f) 0)))) 2)"
+        "(letrec ((y 1) (x (match (lt y 5) ((#t (prod#)) y) ((#f (prod#)) 0)))) 2)"
     )
     y = var("y", 0)
 
@@ -213,8 +222,8 @@ def test_a_letrec_initializer_is_walked_as_a_region():
 def test_every_occurrence_has_a_path_the_walk_accepts():
     program, table = program_of(
         "(letrec ((f (lambda (x)"
-        "              (match (lt x 5) ((#t) x) ((#f) (quote x))))))"
-        " (match (lt 1 2) ((#t) (f 3)) ((#f) 4)))"
+        "              (match (lt x 5) ((#t (prod#)) x) ((#f (prod#)) (quote x))))))"
+        " (match (lt 1 2) ((#t (prod#)) (f 3)) ((#f (prod#)) 4)))"
     )
 
     for identifier in ("f", "x"):
@@ -244,14 +253,18 @@ def test_a_letrec_name_is_not_an_occurrence():
 
 
 def test_quoted_data_is_not_an_occurrence():
-    program, table = program_of("(lambda (x) (quote (match x ((#t) 1) ((#f) 2))))")
+    program, table = program_of(
+        "(lambda (x) (quote (match x ((#t (prod#)) 1) ((#f (prod#)) 2))))"
+    )
 
     with pytest.raises(OccurrenceError):
         path_conditions(Path([2, 1]), program, table)
 
 
 def test_a_path_off_the_tree_is_refused():
-    program, table = program_of("(lambda (x) (match (lt x 5) ((#t) x) ((#f) 0)))")
+    program, table = program_of(
+        "(lambda (x) (match (lt x 5) ((#t (prod#)) x) ((#f (prod#)) 0)))"
+    )
 
     with pytest.raises(OccurrenceError):
         path_conditions(Path([2, 9]), program, table)
@@ -290,7 +303,7 @@ def test_an_ascribed_binder_is_not_among_its_occurrences():
     # `occurrences` must not report the binding site, and every path it does
     # report must be one the walk accepts.
     program, table = program_of(
-        "(letrec (((ascribe# x @int) 1)) (match x ((#t) 1) ((#f) 2)))"
+        "(letrec (((ascribe# x @int) 1)) (match x ((#t (prod#)) 1) ((#f (prod#)) 2)))"
     )
 
     found = occurrences(var("x", 0), program, table)
@@ -304,7 +317,9 @@ def test_an_ascribed_binder_is_not_among_its_occurrences():
 def test_a_define_binder_is_not_an_occurrence():
     # Promoting `define` to a core form created a new binder position, so it
     # needs the same refusal every other binding position has.
-    program, table = program_of("(define x (match 1 ((#t) 2) ((#f) 3)))")
+    program, table = program_of(
+        "(define x (match 1 ((#t (prod#)) 2) ((#f (prod#)) 3)))"
+    )
 
     with pytest.raises(OccurrenceError):
         path_conditions(Path([1]), program, table)
@@ -315,7 +330,7 @@ def test_a_define_binder_is_not_an_occurrence():
 
 def test_an_ascribed_define_binder_is_not_an_occurrence():
     program, table = program_of(
-        "(define (ascribe# x @int) (match 1 ((#t) 2) ((#f) 3)))"
+        "(define (ascribe# x @int) (match 1 ((#t (prod#)) 2) ((#f (prod#)) 3)))"
     )
 
     for steps in [[1], [1, 1], [1, 2]]:
@@ -324,7 +339,9 @@ def test_an_ascribed_define_binder_is_not_an_occurrence():
 
 
 def test_a_define_binder_is_not_among_its_occurrences():
-    program, table = program_of("(define x (match x ((#t) 1) ((#f) 2)))")
+    program, table = program_of(
+        "(define x (match x ((#t (prod#)) 1) ((#f (prod#)) 2)))"
+    )
 
     found = occurrences(Symbol("x"), program, table)
 
@@ -350,7 +367,7 @@ def test_the_path_to_a_free_variable_ends_at_the_form():
     # Which is why the occurrence is reported there and not inside the wrapper.
     program, table = program_of(
         "(lambda (x)"
-        " (match (lt (forall (ascribe# n @int)) 5) ((#t) x) ((#f) 0)))"
+        " (match (lt (forall (ascribe# n @int)) 5) ((#t (prod#)) x) ((#f (prod#)) 0)))"
     )
 
     assert occurrences(Symbol("n"), program, table) == [Path([2, 1, 1])]
@@ -363,7 +380,7 @@ def test_a_pattern_is_not_an_occurrence():
     # Position 0 of a clause is a binding position, so it takes the refusal
     # every other binding position takes — the one a letrec pair's name takes,
     # one level shallower.
-    program, table = program_of("(match xs ((cons x r) x))")
+    program, table = program_of("(match xs ((cons (prod# x r)) x))")
 
     with pytest.raises(OccurrenceError):
         path_conditions(Path([2, 0]), program, table)
@@ -374,7 +391,7 @@ def test_a_pattern_is_not_an_occurrence():
 
 
 def test_a_pattern_binder_is_not_among_its_occurrences():
-    program, table = program_of("(match xs ((cons x r) x))")
+    program, table = program_of("(match xs ((cons (prod# x r)) x))")
 
     found = occurrences(var("x", 0), program, table)
 
@@ -389,7 +406,12 @@ def test_a_clause_guard_names_the_pattern_it_commits_to():
     # What `Guard.pattern` is for: a clause states which constructor the
     # scrutinee is, and a polarity alone cannot say that once there are more
     # than two clauses.
-    program, table = program_of("(match xs ((nil) 0) ((cons x (nil)) 1) ((cons x r) 2))")
+    program, table = program_of(
+        "(match xs"
+        " ((nil (prod#)) 0)"
+        " ((cons (prod# x (nil (prod#)))) 1)"
+        " ((cons (prod# x r)) 2))"
+    )
 
     scrutinee = VarCExpr(Symbol("xs"))
     guards = path_conditions(Path([4, 1]), program, table)
@@ -397,7 +419,7 @@ def test_a_clause_guard_names_the_pattern_it_commits_to():
     assert [guard.consequent for guard in guards] == [False, False, True]
     assert [guard.test for guard in guards] == [scrutinee] * 3
     assert [str(guard.pattern) for guard in guards] == [
-        "(nil)",
-        "(cons x (nil))",
-        "(cons x r)",
+        "(nil (prod#))",
+        "(cons (prod# x (nil (prod#))))",
+        "(cons (prod# x r))",
     ]

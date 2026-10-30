@@ -110,7 +110,7 @@ def test_a_list_denotes_a_recursive_sum_of_two_constructors():
 
 
 def test_unfolding_a_list_leaves_its_tail_folded():
-    # What makes a `(cons x xs)` pattern bind `xs` at the list type as written:
+    # What makes a `(cons (prod# x xs))` pattern bind `xs` at the list type as written:
     # only the top node changes form, so the recursive position comes back as
     # the folded type and no comparison ever meets an unfolding.
     elaborated = type_of("(@list @int)")

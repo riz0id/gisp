@@ -46,8 +46,8 @@ def test_the_empty_combination_is_an_error(bindings):
 @given(st.booleans(), self_evaluating_atoms)
 def test_a_match_evaluates_exactly_the_clause_its_scrutinee_selects(decided, taken):
     # Booleans and not any atom, which is what the `if` this replaces took: a
-    # `(#t)` pattern against a value of another sort is a type error the
-    # checker refuses, and the evaluator refuses it too rather than quietly
+    # `(#t (prod#))` pattern against a value of another sort is a type error
+    # the checker refuses, and the evaluator refuses it too rather than quietly
     # falling through to the next clause.
     #
     # The clause not selected is unbound, so evaluating it would have failed.
@@ -58,8 +58,8 @@ def test_a_match_evaluates_exactly_the_clause_its_scrutinee_selects(decided, tak
         [
             Symbol("match"),
             Symbol("flag"),
-            SList([SList([Symbol("#t")]), bodies[0]]),
-            SList([SList([Symbol("#f")]), bodies[1]]),
+            SList([SList([Symbol("#t"), SList([Symbol("prod#")])]), bodies[0]]),
+            SList([SList([Symbol("#f"), SList([Symbol("prod#")])]), bodies[1]]),
         ]
     )
 
@@ -84,14 +84,24 @@ def test_a_list_pattern_takes_a_list_apart():
         [
             Symbol("match"),
             SList([Symbol("quote"), SList([Integer(1), Integer(2)])]),
-            SList([SList([Symbol("nil")]), Symbol("unbound")]),
             SList(
                 [
-                    # The pattern spreads the cell's payload into two
-                    # operands; the body applies the constructor to the one
-                    # payload. Taking a list apart and putting it back
-                    # together is what says the two agree.
-                    SList([Symbol("cons"), Symbol("x"), Symbol("rest")]),
+                    SList([Symbol("nil"), SList([Symbol("prod#")])]),
+                    Symbol("unbound"),
+                ]
+            ),
+            SList(
+                [
+                    # The pattern and the body are the same text: the cell is
+                    # taken apart by the construction that builds it, down to
+                    # the `prod#` its payload is written with. Taking a list
+                    # apart and putting it back together is what says so.
+                    SList(
+                        [
+                            Symbol("cons"),
+                            SList([Symbol("prod#"), Symbol("x"), Symbol("rest")]),
+                        ]
+                    ),
                     SList(
                         [
                             Symbol("cons"),
@@ -103,9 +113,7 @@ def test_a_list_pattern_takes_a_list_apart():
         ]
     )
 
-    assert evaluate(form, Environment(BUILTINS)) == listed(
-        [Integer(1), Integer(2)]
-    )
+    assert evaluate(form, Environment(BUILTINS)) == listed([Integer(1), Integer(2)])
 
 
 def test_the_empty_list_matches_only_the_empty_list_pattern():
@@ -115,10 +123,26 @@ def test_the_empty_list_matches_only_the_empty_list_pattern():
                 [
                     Symbol("match"),
                     SList([Symbol("quote"), SList(items)]),
-                    SList([SList([Symbol("nil")]), Integer(0)]),
                     SList(
                         [
-                            SList([Symbol("cons"), Symbol("x"), Symbol("rest")]),
+                            SList([Symbol("nil"), SList([Symbol("prod#")])]),
+                            Integer(0),
+                        ]
+                    ),
+                    SList(
+                        [
+                            SList(
+                                [
+                                    Symbol("cons"),
+                                    SList(
+                                        [
+                                            Symbol("prod#"),
+                                            Symbol("x"),
+                                            Symbol("rest"),
+                                        ]
+                                    ),
+                                ]
+                            ),
                             Integer(1),
                         ]
                     ),
@@ -174,8 +198,8 @@ def test_a_boolean_is_distinct_from_the_product_it_carries():
 def test_a_constructed_boolean_is_the_one_a_comparison_answers_with(decided):
     # The property that matters: `@bool` has one representation however a
     # boolean was reached, so a built one and a compared one are the same value
-    # and `eq` says so. Were they two representations, a `(#t)` pattern would
-    # match one and not the other.
+    # and `eq` says so. Were they two representations, a `(#t (prod#))` pattern
+    # would match one and not the other.
     built: Value = construction("#t" if decided else "#f")
     compared: Value = evaluate(
         SList([Symbol("le"), Integer(1), Integer(2 if decided else 0)]),
@@ -214,7 +238,7 @@ def test_a_constructed_list_is_the_one_a_quoted_datum_answers_with():
     # The property that matters, as it did for `@bool`: a list has one
     # representation however it was reached, so a built one and a quoted one
     # are the same value and `eq` says so. Were they two representations, a
-    # `(cons x xs)` pattern would match one and not the other.
+    # `(cons (prod# x xs))` pattern would match one and not the other.
     built = SList(
         [
             Symbol("cons"),
@@ -270,9 +294,9 @@ def test_a_stuck_field_leaves_the_whole_construction_stuck():
 def test_a_wide_product_pattern_binds_its_fields():
     # The other half of representing a product as a tuple of its fields: a
     # `(prod# a b)` pattern is what takes one apart, and the checker reaches it
-    # for any product of two fields. A cons cell's own pattern does not come
-    # here — `payload_fields` has already spread the payload into the cell's
-    # two operands.
+    # for any product of two fields. A cons cell's own pattern comes here too,
+    # one level down — the `prod#` inside `(cons (prod# x xs))` is this pattern
+    # over the cell's payload.
     form = SList(
         [
             Symbol("match"),
@@ -335,7 +359,9 @@ def test_letrec_bindings_shadow_the_environment_in_the_body(name, inner, outer):
 
 
 @given(symbols, symbols, self_evaluating_atoms)
-def test_letrec_prebinds_names_to_the_empty_tuple_then_assigns_in_order(first, second, value):
+def test_letrec_prebinds_names_to_the_empty_tuple_then_assigns_in_order(
+    first, second, value
+):
     assume(first != second)
     forward = SList(
         [
@@ -480,8 +506,8 @@ def test_a_stuck_scrutinee_reduces_no_clause():
     # reaches. Every body here is unbound, so any of them would have failed.
     test = SList([Symbol("lt"), free("n"), Integer(0)])
     clauses = [
-        SList([SList([Symbol("#t")]), Symbol("untaken")]),
-        SList([SList([Symbol("#f")]), Symbol("also")]),
+        SList([SList([Symbol("#t"), SList([Symbol("prod#")])]), Symbol("untaken")]),
+        SList([SList([Symbol("#f"), SList([Symbol("prod#")])]), Symbol("also")]),
     ]
     form = SList([Symbol("match"), test, *clauses])
 

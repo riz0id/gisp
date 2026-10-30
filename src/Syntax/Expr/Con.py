@@ -155,15 +155,18 @@ class RecordConExpr(ProductConExpr):
 
     @override
     def __str__(self: Self) -> str:
-        written: list[str] = [f"({name} {value})" for name, value in self.fields.items()]
+        written: list[str] = [
+            f"({name} {value})" for name, value in self.fields.items()
+        ]
 
         return f"({' '.join([PRODUCT, *written])})"
 
 
 def spread(payload: Expr) -> list[Expr]:
-    # The values a constructor pattern's operands match, which is
-    # `TypeCheck.Patterns.payload_fields` over values rather than types: a
-    # product payload's fields, and the payload itself when it is not one.
+    # A product value's fields, and the value itself where it is not a product.
+    # `TypeCheck.Patterns.product_fields` over values rather than types, and
+    # read for the same reason: a cons cell's payload holds the head and the
+    # rest whichever of the two product shapes it was built as.
     match payload:
         case ProductConExpr() as fields:
             return list(fields.values())

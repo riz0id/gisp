@@ -36,7 +36,7 @@ from Syntax.Type import (
     unfold,
 )
 from TypeCheck.Elaborate import ElaborateError, elaborate
-from TypeCheck.Patterns import exhaustive, payload_fields
+from TypeCheck.Patterns import missing, operand_types, product_fields
 
 __all__: list[str] = [
     "ElaborateError",
@@ -242,13 +242,18 @@ class TypeChecker:
             self.check(body, ty)
             rows.append([pattern])
 
-        if not exhaustive(rows, [scrutinee_type], self.store, self.table):
-            # Said as the type it is about, because that is what names the
-            # constructors a clause is missing: the form is total or it is not
-            # an expression, and a `match` falling off its last clause would
-            # have no value to answer with.
+        witness: list[Expr] | None = missing(
+            rows, [scrutinee_type], self.store, self.table
+        )
+
+        if witness is not None:
+            # Said as the type it is about and as the pattern that is missing
+            # from it: the form is total or it is not an expression, and a
+            # `match` falling off its last clause would have no value to answer
+            # with. One column was asked about, so the witness is the one
+            # pattern a clause would have to add.
             raise TypeCheckError(
-                f"a match on {scrutinee_type} leaves values unmatched."
+                f"a match on {scrutinee_type} leaves {witness[0]} unmatched."
             )
 
     def pattern(self, pattern: Expr, ty: Type) -> None:
@@ -293,7 +298,12 @@ class TypeChecker:
 
     def destructuring(self, head: Symbol, operands: list[Expr], ty: Type) -> None:
         # A constructor pattern: the head names one of `ty`'s constructors and
-        # the operands are patterns over its payload.
+        # the operands are patterns over what the construction it inverts is
+        # written with. `construction` is the mirror of this, and
+        # `operand_types` is the one rule both read — so `(cons (prod# x xs))`
+        # is the pattern for a cell exactly as `(cons (prod# 1 ()))` is a cell,
+        # and no constructor is written one way building and another taking
+        # apart.
         cons: dict[Symbol, Type] | None = constructors(ty, self.store)
 
         if cons is None:
@@ -311,11 +321,16 @@ class TypeChecker:
             # already makes of a construction's head.
             raise TypeCheckError(f"{head} does not construct {ty}.")
 
-        fields: list[Type] = payload_fields(cons[named])
+        fields: list[Type] = operand_types(ty, cons[named], self.store)
 
         if len(operands) != len(fields):
+            # Said with a counted noun, because the count is one for every sum
+            # constructor there is: the message a mis-written pattern gets is
+            # almost always this one.
+            written: str = "pattern" if len(fields) == 1 else "patterns"
+
             raise TypeCheckError(
-                f"{head} takes {len(fields)} patterns, not {len(operands)}."
+                f"{head} takes {len(fields)} {written}, not {len(operands)}."
             )
 
         for operand, field_type in zip(operands, fields, strict=True):
@@ -401,8 +416,8 @@ class TypeChecker:
                 # are checked at. The empty list inhabits every list type — it
                 # is the one datum that constructs a list without naming its
                 # element type — and a longer one is read a cell at a time, as
-                # a `(cons x xs)` pattern takes one apart.
-                match datum, payload_fields(cons[NIL]), payload_fields(cons[CONS]):
+                # a `(cons (prod# x xs))` pattern takes one apart.
+                match datum, product_fields(cons[NIL]), product_fields(cons[CONS]):
                     case (SList([]), [], _):
                         pass
                     case (SList([first, *rest]), _, [element, remaining]):

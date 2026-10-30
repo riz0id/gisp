@@ -167,15 +167,19 @@ def test_a_lambda_does_not_inhabit_a_ground_type():
 
 
 def test_a_match_constrains_the_scrutinee_and_every_clause_body():
-    program, table = program_of("(lambda (x) (match (le x 1) ((#t) x) ((#f) 5)))", 1415)
+    program, table = program_of(
+        "(lambda (x) (match (le x 1) ((#t (prod#)) x) ((#f (prod#)) 5)))", 1415
+    )
 
     TypeChecker(table=table).check(program, unary(IntType(), IntType()))
 
 
 def test_a_non_boolean_scrutinee_is_refused():
-    # `(#t)` is not a constructor of `@int`, which is what refuses this: the
-    # scrutinee's own type is what a pattern is read against.
-    program, table = program_of("(lambda (x) (match 1 ((#t) x) ((#f) x)))", 1416)
+    # `(#t (prod#))` is not a constructor of `@int`, which is what refuses
+    # this: the scrutinee's own type is what a pattern is read against.
+    program, table = program_of(
+        "(lambda (x) (match 1 ((#t (prod#)) x) ((#f (prod#)) x)))", 1416
+    )
 
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).check(program, unary(IntType(), IntType()))
@@ -183,7 +187,8 @@ def test_a_non_boolean_scrutinee_is_refused():
 
 def test_a_clause_body_off_the_checked_type_is_refused():
     program, table = program_of(
-        "(lambda (x) (match (le x 1) ((#t) x) ((#f) (#f (prod#)))))", 1417
+        "(lambda (x) (match (le x 1) ((#t (prod#)) x) ((#f (prod#)) (#f (prod#)))))",
+        1417,
     )
 
     with pytest.raises(TypeCheckError):
@@ -195,7 +200,11 @@ def test_an_ill_typed_scrutinee_is_refused():
     # operands, so a scrutinee has to be checked at what was read as well as
     # read — or `(le #t #t)` would pass for the `@bool` it claims to be.
     program, table = program_of(
-        "(lambda (x) (match (le (#t (prod#)) (#t (prod#))) ((#t) x) ((#f) x)))", 1418
+        "(lambda (x)"
+        " (match (le (#t (prod#)) (#t (prod#)))"
+        "   ((#t (prod#)) x)"
+        "   ((#f (prod#)) x)))",
+        1418,
     )
 
     with pytest.raises(TypeCheckError):
@@ -203,7 +212,9 @@ def test_an_ill_typed_scrutinee_is_refused():
 
 
 def test_a_list_match_covers_both_constructors():
-    program, table = program_of("(match xs ((nil) 0) ((cons y ys) 1))", 1420)
+    program, table = program_of(
+        "(match xs ((nil (prod#)) 0) ((cons (prod# y ys)) 1))", 1420
+    )
     store = Context.default()
     store.register(Symbol("xs"), list_of(IntType()))
 
@@ -211,7 +222,7 @@ def test_a_list_match_covers_both_constructors():
 
 
 def test_a_list_match_missing_a_constructor_is_refused():
-    program, table = program_of("(match xs ((nil) 0))", 1421)
+    program, table = program_of("(match xs ((nil (prod#)) 0))", 1421)
     store = Context.default()
     store.register(Symbol("xs"), list_of(IntType()))
 
@@ -223,7 +234,9 @@ def test_a_nested_pattern_does_not_cover_its_constructor_on_its_own():
     # Naming both constructors is not coverage: this one misses every list of
     # two or more, so exhaustiveness is a question about a constructor's fields
     # and not about the set of names a clause mentions.
-    program, table = program_of("(match xs ((nil) 0) ((cons y (nil)) 1))", 1422)
+    program, table = program_of(
+        "(match xs ((nil (prod#)) 0) ((cons (prod# y (nil (prod#)))) 1))", 1422
+    )
     store = Context.default()
     store.register(Symbol("xs"), list_of(IntType()))
 
@@ -233,7 +246,11 @@ def test_a_nested_pattern_does_not_cover_its_constructor_on_its_own():
     # Adding the clause that does cover it makes the same three-way shape the
     # libraries are written in.
     program, table = program_of(
-        "(match xs ((nil) 0) ((cons y (nil)) 1) ((cons y ys) 2))", 1423
+        "(match xs"
+        " ((nil (prod#)) 0)"
+        " ((cons (prod# y (nil (prod#)))) 1)"
+        " ((cons (prod# y ys)) 2))",
+        1423,
     )
     store = Context.default()
     store.register(Symbol("xs"), list_of(IntType()))
@@ -244,14 +261,18 @@ def test_a_nested_pattern_does_not_cover_its_constructor_on_its_own():
 def test_a_pattern_binds_its_operands_at_the_payload_types():
     # `y` is the element and `ys` the rest, which is the whole of what the cons
     # payload says — and the body is what proves the checker registered them.
-    program, table = program_of("(match xs ((nil) xs) ((cons y ys) ys))", 1424)
+    program, table = program_of(
+        "(match xs ((nil (prod#)) xs) ((cons (prod# y ys)) ys))", 1424
+    )
     store = Context.default()
     store.register(Symbol("xs"), list_of(IntType()))
 
     TypeChecker(table=table, store=store).check(program, list_of(IntType()))
 
     # The element is an `@int`, so a clause returning it at a list type is not.
-    program, table = program_of("(match xs ((nil) xs) ((cons y ys) y))", 1425)
+    program, table = program_of(
+        "(match xs ((nil (prod#)) xs) ((cons (prod# y ys)) y))", 1425
+    )
     store = Context.default()
     store.register(Symbol("xs"), list_of(IntType()))
 
@@ -259,8 +280,12 @@ def test_a_pattern_binds_its_operands_at_the_payload_types():
         TypeChecker(table=table, store=store).check(program, list_of(IntType()))
 
 
-def test_a_pattern_operand_count_off_the_payload_is_refused():
-    program, table = program_of("(match xs ((nil) 0) ((cons y) 1))", 1426)
+def test_a_pattern_operand_count_off_the_constructor_is_refused():
+    # Two operands where `cons` carries one payload. This is the abbreviated
+    # `(cons y ys)` every `match` on a list used to be written with, and what
+    # refuses it is the count the constructor has rather than the count its
+    # payload's fields have.
+    program, table = program_of("(match xs ((nil (prod#)) 0) ((cons y ys) 1))", 1426)
     store = Context.default()
     store.register(Symbol("xs"), list_of(IntType()))
 
@@ -299,7 +324,7 @@ def test_a_procedure_cannot_be_matched_on():
 def test_a_sum_is_taken_apart_by_its_constructors():
     # The eliminator sums never had. `check` could already build one, and this
     # is the first thing that reads one back.
-    program, table = program_of("(match s ((zero) 0) ((succ n) n))", 1430)
+    program, table = program_of("(match s ((zero (prod#)) 0) ((succ n) n))", 1430)
     store = Context.default()
     store.register(
         Symbol("s"),
@@ -351,7 +376,7 @@ def test_a_recursive_sum_is_matched_through_its_unfolding():
         Symbol("a"),
         SumType({Symbol("zero"): ProdType(), Symbol("succ"): VarType(Symbol("a"))}),
     )
-    program, table = program_of("(match s ((zero) s) ((succ m) m))", 1434)
+    program, table = program_of("(match s ((zero (prod#)) s) ((succ m) m))", 1434)
     store = Context.default()
     store.register(Symbol("s"), nat)
 
@@ -360,7 +385,7 @@ def test_a_recursive_sum_is_matched_through_its_unfolding():
 
 def test_a_pattern_binder_takes_an_ascription_checked_against_its_position():
     program, table = program_of(
-        "(match xs ((nil) 0) ((cons (ascribe# y @int) ys) y))", 1435
+        "(match xs ((nil (prod#)) 0) ((cons (prod# (ascribe# y @int) ys)) y))", 1435
     )
     store = Context.default()
     store.register(Symbol("xs"), list_of(IntType()))
@@ -369,7 +394,7 @@ def test_a_pattern_binder_takes_an_ascription_checked_against_its_position():
 
     # Ascribed off its position, which the function type fixes.
     program, table = program_of(
-        "(match xs ((nil) 0) ((cons (ascribe# y @bool) ys) 0))", 1436
+        "(match xs ((nil (prod#)) 0) ((cons (prod# (ascribe# y @bool) ys)) 0))", 1436
     )
     store = Context.default()
     store.register(Symbol("xs"), list_of(IntType()))
@@ -381,7 +406,7 @@ def test_a_pattern_binder_takes_an_ascription_checked_against_its_position():
 def test_two_clauses_may_bind_the_one_spelling():
     # Each clause is a region of its own, so the two `y` binders are distinct
     # symbols and the store holds both.
-    program, table = program_of("(match xs ((cons y ys) y) (y 0))", 1437)
+    program, table = program_of("(match xs ((cons (prod# y ys)) y) (y 0))", 1437)
     store = Context.default()
     store.register(Symbol("xs"), list_of(IntType()))
 
@@ -533,11 +558,11 @@ def test_the_empty_list_construction_checks_at_any_element_type():
     TypeChecker(table=table).check(program, list_of(BOOL))
 
 
-def test_a_cell_payload_is_not_spread_across_the_operands():
-    # The asymmetry every sum has: a pattern spreads the payload's fields, so
-    # `(cons x xs)` takes a cell apart with two operands, while a construction
-    # applies the constructor to the one payload. `(#t (prod#))` is written for
-    # the same reason.
+def test_a_cell_construction_takes_one_payload():
+    # A sum constructor carries one payload however wide that payload is, so
+    # the cell's two fields are written inside a `prod#` and not beside the
+    # constructor. The pattern `(cons (prod# x xs))` is written the same way,
+    # which is the whole of why there is no asymmetry left to state here.
     program, table = program_of("(cons 1 (nil (prod#)))", 1443)
 
     with pytest.raises(TypeCheckError):

@@ -15,6 +15,14 @@ from Analysis.CExpr import (
     VarCExpr,
 )
 from Analysis.Path import Path
+from Analysis.PatternCoverage import (
+    Coverage,
+    CoverageError,
+    clause_body,
+    clause_pattern,
+    clauses,
+    coverage,
+)
 from Analysis.Support import Support
 from Resolve import BindingTable, meaning
 from Syntax import Expr, Integer, SList, Symbol, binder_name
@@ -47,22 +55,6 @@ class Guard:
     test: CExpr
     pattern: Expr
     consequent: bool
-
-
-def clause_pattern(clause: Expr) -> Expr:
-    match clause:
-        case SList([pattern, _]):
-            return pattern
-        case _:
-            return clause
-
-
-def clause_body(clause: Expr) -> Expr:
-    match clause:
-        case SList([_, body]):
-            return body
-        case _:
-            return clause
 
 
 def occurs_in(var: Symbol, expr: Expr, table: BindingTable) -> bool:
@@ -327,6 +319,108 @@ def opaque(program: Expr, table: BindingTable) -> list[Symbol]:
     return rets
 
 
+def matches(program: Expr) -> list[Path]:
+    # Every `match` form in the program, by path.
+    #
+    # Read off `arms` rather than walked again. `parse` gives every `match` at
+    # least one pattern/body clause, so `arms` records at least one arm for
+    # each one, and an arm is a clause's body — two steps below the form. The
+    # skipping is `arms`' too, which is what leaves a `match` inside quoted
+    # data alone: that one is data and not a form.
+    rets: list[Path] = []
+
+    for arm in arms(program):
+        form: Path = arm[:-2]
+
+        if form not in rets:
+            rets.append(form)
+
+    return rets
+
+
+def coverages(
+    program: Expr,
+    table: BindingTable,
+    store: Context,
+) -> list[tuple[Path, Coverage | None]]:
+    # What each `match` in the program covers, in the order the forms are
+    # reached. A `None` is a `match` coverage has nothing to say about, which
+    # `PatternCoverage.coverage` is where the reading of that lives.
+    return [
+        (path, coverage(path.follow(program), table, store))
+        for path in matches(program)
+    ]
+
+
+def incomplete(
+    program: Expr,
+    table: BindingTable,
+    store: Context,
+) -> tuple[Path, Coverage] | None:
+    # The first `match` in the program that leaves a value unmatched, or `None`
+    # where none does. A `match` with no verdict is not one of them: coverage
+    # declining to answer is not an answer of "incomplete".
+    for path, verdict in coverages(program, table, store):
+        if verdict is not None and not verdict.complete():
+            return path, verdict
+
+    return None
+
+
+def analysable(program: Expr, table: BindingTable, store: Context) -> None:
+    # The precondition the readings below are made under, refused where it
+    # fails.
+    #
+    # A guard says that reaching a clause means the clauses before it failed
+    # and that one matched, which describes the program only where some clause
+    # always matches. A `match` that leaves a value unmatched falls off its last
+    # clause and has no value at all, so a series of guards about it describes a
+    # path the program never takes — and a refinement read off that series is
+    # about nothing.
+    #
+    # The type checker refuses such a program too, which is why nothing
+    # reaching `--analyse` can be one. This is the same precondition stated
+    # where the analysis itself is entered, for the caller that comes to
+    # `refinements` with a program the checker never saw.
+    found: tuple[Path, Coverage] | None = incomplete(program, table, store)
+
+    if found is not None:
+        path, verdict = found
+
+        raise CoverageError(f"the match at {path} leaves {verdict.witness} unmatched.")
+
+
+def selections(path: Path, program: Expr) -> list[tuple[Expr, int]]:
+    # The clauses a path selects, as ⟨`match` form, clause position⟩ and in the
+    # order the path reaches them.
+    #
+    # Read by prefix rather than by walking the program, which is what makes
+    # the two path shapes the analysis is called with one case: a clause's own
+    # path ends at the clause, and an arm's path — what `arms` answers — ends
+    # one step below it, in the body.
+    rets: list[tuple[Expr, int]] = []
+
+    for length in range(1, len(path) + 1):
+        prefix: Path = path[:length]
+        position: int = prefix[-1]
+
+        if position < 2:
+            continue
+
+        try:
+            form: Expr = prefix[:-1].follow(program)
+        except ValueError:
+            # A prefix that does not descend means no longer one does either.
+            break
+
+        read: tuple[Expr, list[Expr]] | None = clauses(form)
+
+        if read is not None and position - 2 < len(read[1]):
+            rets.append((form, position - 2))
+
+    return rets
+
+
 def path_conditions(
     path: Path,
     program: Expr,
@@ -568,9 +662,13 @@ def matching(
     context: Context,
 ) -> Support:
     match pattern:
-        case SList([Symbol() as head]) if meaning(head, table) == TRUE:
+        case SList([Symbol() as head, _]) if meaning(head, table) == TRUE:
+            # The payload pattern is matched and passed over. Reaching the
+            # clause is the whole of what the refinement is about, and a `#t`
+            # clause is reached exactly when the scrutinee is true however the
+            # empty product it carries was written.
             return satisfying(test, target, table, polarity, context)
-        case SList([Symbol() as head]) if meaning(head, table) == FALSE:
+        case SList([Symbol() as head, _]) if meaning(head, table) == FALSE:
             return satisfying(test, target, table, not polarity, context)
         case Integer() as value if isinstance(test, VarCExpr) and meaning(
             test.symbol, table
@@ -599,6 +697,8 @@ def refinements(
     table: BindingTable,
     context: Context,
 ) -> list[Support]:
+    analysable(program, table, context)
+
     guards: list[Guard] = path_conditions(path, program, table)
     rets: list[Support] = [Support.integers()]
 
@@ -617,9 +717,25 @@ def unreachable(
     table: BindingTable,
     context: Context,
 ) -> bool:
+    analysable(program, table, context)
+
     guards: list[Guard] = path_conditions(path, program, table)
 
-    return any(
+    if any(
         contradictory(guard.test, guard.pattern, guard.consequent, context, table)
         for guard in guards
-    )
+    ):
+        return True
+
+    # The structural reason beside the contradictory one. A guard is about what
+    # the scrutinee may be, and reads a clause as unreachable where no value
+    # satisfies the series; this reads a clause as unreachable where its
+    # pattern matches nothing the clauses before it did not — which is true of
+    # the clause whatever any variable may be.
+    for form, position in selections(path, program):
+        verdict: Coverage | None = coverage(form, table, context)
+
+        if verdict is not None and position in verdict.redundant:
+            return True
+
+    return False

@@ -109,7 +109,8 @@ def test_a_boolean_match_scopes_each_clause_separately():
     # which is what lets resolution decide whether the spelling names a
     # constructor or a binding the program made.
     expanded = expand(
-        read("(lambda (x) (match x ((#t) x) ((#f) x)))"), fresh=counter(920)
+        read("(lambda (x) (match x ((#t (prod#)) x) ((#f (prod#)) x)))"),
+        fresh=counter(920),
     )
 
     parameter = Symbol("x", {Scope(920)})
@@ -124,13 +125,23 @@ def test_a_boolean_match_scopes_each_clause_separately():
                     Symbol("x", {Scope(920)}),
                     SList(
                         [
-                            SList([Symbol("#t", {Scope(920)})]),
+                            SList(
+                                [
+                                    Symbol("#t", {Scope(920)}),
+                                    SList([Symbol("prod#", {Scope(920)})]),
+                                ]
+                            ),
                             Symbol("x", {Scope(920), Scope(921)}),
                         ]
                     ),
                     SList(
                         [
-                            SList([Symbol("#f", {Scope(920)})]),
+                            SList(
+                                [
+                                    Symbol("#f", {Scope(920)}),
+                                    SList([Symbol("prod#", {Scope(920)})]),
+                                ]
+                            ),
                             Symbol("x", {Scope(920), Scope(922)}),
                         ]
                     ),
@@ -163,7 +174,9 @@ def test_each_match_clause_is_a_region_of_its_own():
     # scope for the whole form because their binders share one region; two
     # clauses are two regions, so two clauses binding the one spelling are two
     # distinct binders.
-    expanded = expand(read("(match xs ((cons x r) x) ((nil) x))"), fresh=counter(930))
+    expanded = expand(
+        read("(match xs ((cons (prod# x r)) x) ((nil (prod#)) x))"), fresh=counter(930)
+    )
 
     assert expanded == SList(
         [
@@ -174,14 +187,24 @@ def test_each_match_clause_is_a_region_of_its_own():
                     SList(
                         [
                             Symbol("cons"),
-                            Symbol("x", {Scope(930)}),
-                            Symbol("r", {Scope(930)}),
+                            SList(
+                                [
+                                    Symbol("prod#"),
+                                    Symbol("x", {Scope(930)}),
+                                    Symbol("r", {Scope(930)}),
+                                ]
+                            ),
                         ]
                     ),
                     Symbol("x", {Scope(930)}),
                 ]
             ),
-            SList([SList([Symbol("nil")]), Symbol("x", {Scope(931)})]),
+            SList(
+                [
+                    SList([Symbol("nil"), SList([Symbol("prod#")])]),
+                    Symbol("x", {Scope(931)}),
+                ]
+            ),
         ]
     )
 
@@ -254,7 +277,7 @@ def test_quote_passes_through_untouched():
         "(match n (p))",
         "(match n (p b c))",
         "(match n (() b))",
-        "(match n ((cons x x) b))",
+        "(match n ((cons (prod# x x)) b))",
         "(lambda (match) match)",
         "(letrec ((match 5)) match)",
     ],
@@ -471,7 +494,10 @@ def test_a_nested_define_is_refused():
         expand(read("(lambda (x) (define x 5))"), fresh=counter(963))
 
     with pytest.raises(ExpandError):
-        expand(read("(match 1 ((#t) (define y 5)) ((#f) 2))"), fresh=counter(964))
+        expand(
+            read("(match 1 ((#t (prod#)) (define y 5)) ((#f (prod#)) 2))"),
+            fresh=counter(964),
+        )
 
 
 def test_an_ascribed_macro_name_is_refused():

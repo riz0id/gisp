@@ -15,7 +15,6 @@ from Syntax import (
     Value,
     as_data,
     binder_name,
-    spread,
     unit,
 )
 
@@ -91,15 +90,17 @@ def constructed(
 ) -> bool:
     match value:
         case ProductConExpr() as fields if head.identifier == "prod#":
-            # A product names its own fields, so the operands are read against
-            # them directly; every other constructor carries a payload, and
-            # `spread` is what reads through it.
+            # A product is written as its fields, so the operands are read
+            # against them one each; every other constructor is written as its
+            # one payload, and the pattern for that payload is what reads
+            # through it. The reading `TypeCheck.Patterns.operand_types` makes
+            # of the type, over the value.
             matching: list[Expr] = list(fields.values())
         case SumConExpr(constructor=con, payload=payload):
             if con.identifier != head.identifier:
                 return False
 
-            matching = spread(payload)
+            matching = [payload]
         case _:
             raise EvalError(f"cannot match ({head} ...) against {value}")
 

@@ -7,7 +7,7 @@ from Expander import expand, parse
 from Reader import read
 from Resolve import BindingTable, bindings
 from Syntax import Expr, Scope
-from Syntax.Type import BOOL, CharType, IntType, list_of, Type
+from Syntax.Type import BOOL, CharType, IntType, Type, list_of
 from TypeCheck import TypeChecker, TypeCheckError, check_toplevel
 
 # Counters from the 1800s, so no expectation here depends on the global fresh-uid
@@ -56,7 +56,11 @@ def test_an_unascribed_reference_has_no_type():
 
 
 def test_an_application_has_its_heads_return_type():
-    source = "(letrec (((ascribe# f (@fun (@prod @int) @bool)) (lambda (x) (#t (prod#))))) (f 1))"
+    source = (
+        "(letrec (((ascribe# f (@fun (@prod @int) @bool))"
+        " (lambda (x) (#t (prod#)))))"
+        " (f 1))"
+    )
     program, checker = checker_of(source, 1803)
 
     assert checker.type_of(program) == BOOL
@@ -72,7 +76,9 @@ def test_a_polymorphic_head_is_instantiated_from_its_operands():
 
 
 def test_a_match_takes_its_first_clauses_type():
-    program, checker = checker_of("(match (le 1 2) ((#t) 1) ((#f) 2))", 1805)
+    program, checker = checker_of(
+        "(match (le 1 2) ((#t (prod#)) 1) ((#f (prod#)) 2))", 1805
+    )
 
     assert checker.type_of(program) == IntType()
 
@@ -233,13 +239,17 @@ def test_a_top_level_declaration_is_refused_at_a_type_it_does_not_inhabit():
 
 
 def test_a_top_level_expression_is_checked_at_the_type_it_has():
-    program, checker = checker_of("(match (le 1 2) ((#t) 1) ((#f) 2))", 1825)
+    program, checker = checker_of(
+        "(match (le 1 2) ((#t (prod#)) 1) ((#f (prod#)) 2))", 1825
+    )
 
     check_toplevel(program, checker)
 
 
 def test_a_top_level_expression_is_refused_where_its_branches_disagree():
-    program, checker = checker_of("(match (le 1 2) ((#t) 1) ((#f) #\\a))", 1826)
+    program, checker = checker_of(
+        "(match (le 1 2) ((#t (prod#)) 1) ((#f (prod#)) #\\a))", 1826
+    )
 
     with pytest.raises(TypeCheckError):
         check_toplevel(program, checker)

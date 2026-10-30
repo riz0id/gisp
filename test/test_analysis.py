@@ -21,7 +21,10 @@ def counter() -> Callable[[], Scope]:
 
 
 def test_a_reference_in_test_position_is_a_condition():
-    expanded = expand(read("(lambda (x) (match x ((#t) 1) ((#f) 2)))"), fresh=counter())
+    expanded = expand(
+        read("(lambda (x) (match x ((#t (prod#)) 1) ((#f (prod#)) 2)))"),
+        fresh=counter(),
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -32,7 +35,8 @@ def test_a_reference_in_test_position_is_a_condition():
 
 def test_a_reference_in_a_branch_is_not_a_condition():
     expanded = expand(
-        read("(lambda (x) (match #t ((#t) x) ((#f) 2)))"), fresh=counter()
+        read("(lambda (x) (match #t ((#t (prod#)) x) ((#f (prod#)) 2)))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -42,7 +46,8 @@ def test_a_reference_in_a_branch_is_not_a_condition():
 
 def test_the_whole_test_is_returned_not_the_occurrence():
     expanded = expand(
-        read("(lambda (f x) (match (f x) ((#t) 1) ((#f) 2)))"), fresh=counter()
+        read("(lambda (f x) (match (f x) ((#t (prod#)) 1) ((#f (prod#)) 2)))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -58,7 +63,8 @@ def test_the_whole_test_is_returned_not_the_occurrence():
 
 def test_a_letrec_bound_reference_in_test_position_is_a_condition():
     expanded = expand(
-        read("(letrec ((x 1)) (match x ((#t) 2) ((#f) 3)))"), fresh=counter()
+        read("(letrec ((x 1)) (match x ((#t (prod#)) 2) ((#f (prod#)) 3)))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -70,7 +76,8 @@ def test_a_letrec_bound_reference_in_test_position_is_a_condition():
 
 def test_a_letrec_bound_reference_in_a_branch_is_not_a_condition():
     expanded = expand(
-        read("(letrec ((x 1)) (match #t ((#t) x) ((#f) 2)))"), fresh=counter()
+        read("(letrec ((x 1)) (match #t ((#t (prod#)) x) ((#f (prod#)) 2)))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -80,7 +87,10 @@ def test_a_letrec_bound_reference_in_a_branch_is_not_a_condition():
 
 def test_a_letrec_bound_application_is_returned_whole():
     expanded = expand(
-        read("(letrec ((f (lambda (y) y)) (x 1)) (match (f x) ((#t) 2) ((#f) 3)))"),
+        read(
+            "(letrec ((f (lambda (y) y)) (x 1))"
+            " (match (f x) ((#t (prod#)) 2) ((#f (prod#)) 3)))"
+        ),
         fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
@@ -94,7 +104,8 @@ def test_a_letrec_bound_application_is_returned_whole():
 def test_a_letrec_initializer_and_body_are_both_regions():
     expanded = expand(
         read(
-            "(letrec ((f (match f ((#t) 1) ((#f) 2)))) (match (f 3) ((#t) 4) ((#f) 5)))"
+            "(letrec ((f (match f ((#t (prod#)) 1) ((#f (prod#)) 2))))"
+            " (match (f 3) ((#t (prod#)) 4) ((#f (prod#)) 5)))"
         ),
         fresh=counter(),
     )
@@ -112,7 +123,9 @@ def test_a_letrec_initializer_and_body_are_both_regions():
 def test_a_letrec_region_spans_sibling_initializers():
     expanded = expand(
         read(
-            "(letrec ((f (match g ((#t) 1) ((#f) 2))) (g (match f ((#t) 3) ((#f) 4)))) 5)"
+            "(letrec ((f (match g ((#t (prod#)) 1) ((#f (prod#)) 2)))"
+            "         (g (match f ((#t (prod#)) 3) ((#f (prod#)) 4))))"
+            " 5)"
         ),
         fresh=counter(),
     )
@@ -134,7 +147,8 @@ def test_a_letrec_region_spans_sibling_initializers():
 
 def test_a_reference_from_an_enclosing_lambda_is_found():
     expanded = expand(
-        read("(lambda (x) (lambda (y) (match x ((#t) 1) ((#f) 2))))"), fresh=counter()
+        read("(lambda (x) (lambda (y) (match x ((#t (prod#)) 1) ((#f (prod#)) 2))))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -146,7 +160,9 @@ def test_a_reference_from_an_enclosing_lambda_is_found():
 
 def test_a_reference_from_an_enclosing_letrec_is_found():
     expanded = expand(
-        read("(letrec ((x 1)) (lambda (y) (match x ((#t) 2) ((#f) 3))))"),
+        read(
+            "(letrec ((x 1)) (lambda (y) (match x ((#t (prod#)) 2) ((#f (prod#)) 3))))"
+        ),
         fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
@@ -159,7 +175,8 @@ def test_a_reference_from_an_enclosing_letrec_is_found():
 
 def test_an_adjacent_lambda_shadow_belongs_to_the_inner_binder():
     expanded = expand(
-        read("(lambda (x) (lambda (x) (match x ((#t) 1) ((#f) 2))))"), fresh=counter()
+        read("(lambda (x) (lambda (x) (match x ((#t (prod#)) 1) ((#f (prod#)) 2))))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -174,7 +191,10 @@ def test_an_adjacent_lambda_shadow_belongs_to_the_inner_binder():
 
 def test_a_three_deep_lambda_shadow_belongs_to_the_innermost_binder():
     expanded = expand(
-        read("(lambda (x) (lambda (x) (lambda (x) (match x ((#t) 1) ((#f) 2)))))"),
+        read(
+            "(lambda (x) (lambda (x) (lambda (x)"
+            " (match x ((#t (prod#)) 1) ((#f (prod#)) 2)))))"
+        ),
         fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
@@ -189,7 +209,10 @@ def test_a_three_deep_lambda_shadow_belongs_to_the_innermost_binder():
 
 def test_an_interleaved_shadow_belongs_to_its_own_binder():
     expanded = expand(
-        read("(lambda (x) (lambda (y) (lambda (x) (match y ((#t) 1) ((#f) 2)))))"),
+        read(
+            "(lambda (x) (lambda (y) (lambda (x)"
+            " (match y ((#t (prod#)) 1) ((#f (prod#)) 2)))))"
+        ),
         fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
@@ -206,7 +229,10 @@ def test_an_interleaved_shadow_belongs_to_its_own_binder():
 
 def test_an_adjacent_letrec_shadow_belongs_to_the_inner_binder():
     expanded = expand(
-        read("(letrec ((x 1)) (letrec ((x 2)) (match x ((#t) 3) ((#f) 4))))"),
+        read(
+            "(letrec ((x 1)) (letrec ((x 2))"
+            " (match x ((#t (prod#)) 3) ((#f (prod#)) 4))))"
+        ),
         fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
@@ -220,7 +246,9 @@ def test_an_adjacent_letrec_shadow_belongs_to_the_inner_binder():
 
 def test_a_letrec_name_shadows_a_lambda_parameter():
     expanded = expand(
-        read("(lambda (x) (letrec ((x 1)) (match x ((#t) 2) ((#f) 3))))"),
+        read(
+            "(lambda (x) (letrec ((x 1)) (match x ((#t (prod#)) 2) ((#f (prod#)) 3))))"
+        ),
         fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
@@ -234,7 +262,9 @@ def test_a_letrec_name_shadows_a_lambda_parameter():
 
 def test_a_lambda_parameter_shadows_a_letrec_name():
     expanded = expand(
-        read("(letrec ((x 1)) (lambda (x) (match x ((#t) 2) ((#f) 3))))"),
+        read(
+            "(letrec ((x 1)) (lambda (x) (match x ((#t (prod#)) 2) ((#f (prod#)) 3))))"
+        ),
         fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
@@ -251,7 +281,12 @@ def test_a_lambda_parameter_shadows_a_letrec_name():
 
 def test_a_nested_match_in_a_scrutinee_has_a_condition_of_its_own():
     expanded = expand(
-        read("(lambda (x) (match (match x ((#t) 1) ((#f) 2)) ((#t) 3) ((#f) 4)))"),
+        read(
+            "(lambda (x)"
+            " (match (match x ((#t (prod#)) 1) ((#f (prod#)) 2))"
+            "   ((#t (prod#)) 3)"
+            "   ((#f (prod#)) 4)))"
+        ),
         fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
@@ -261,8 +296,8 @@ def test_a_nested_match_in_a_scrutinee_has_a_condition_of_its_own():
     inner = [
         Symbol("match"),
         x,
-        SList([SList([Symbol("#t")]), Integer(1)]),
-        SList([SList([Symbol("#f")]), Integer(2)]),
+        SList([SList([Symbol("#t"), SList([Symbol("prod#")])]), Integer(1)]),
+        SList([SList([Symbol("#f"), SList([Symbol("prod#")])]), Integer(2)]),
     ]
 
     # The outer scrutinee is the whole inner `match`, which the condition
@@ -274,7 +309,9 @@ def test_a_nested_match_in_a_scrutinee_has_a_condition_of_its_own():
 def test_sibling_conditions_come_out_in_source_order():
     expanded = expand(
         read(
-            "(lambda (f g h x) (f (match (g x) ((#t) 1) ((#f) 2)) (match (h x) ((#t) 3) ((#f) 4))))"
+            "(lambda (f g h x)"
+            " (f (match (g x) ((#t (prod#)) 1) ((#f (prod#)) 2))"
+            "    (match (h x) ((#t (prod#)) 3) ((#f (prod#)) 4))))"
         ),
         fresh=counter(),
     )
@@ -290,7 +327,9 @@ def test_sibling_conditions_come_out_in_source_order():
 def test_equal_tests_are_reported_once_per_if():
     expanded = expand(
         read(
-            "(lambda (f x) (f (match x ((#t) 1) ((#f) 2)) (match x ((#t) 3) ((#f) 4))))"
+            "(lambda (f x)"
+            " (f (match x ((#t (prod#)) 1) ((#f (prod#)) 2))"
+            "    (match x ((#t (prod#)) 3) ((#f (prod#)) 4))))"
         ),
         fresh=counter(),
     )
@@ -305,7 +344,7 @@ def test_equal_tests_are_reported_once_per_if():
 
 def test_a_lambda_parameter_is_not_a_use():
     expanded = expand(
-        read("(lambda (x) (match (lambda (y) 1) ((#t) 1) ((#f) 2)))"),
+        read("(lambda (x) (match (lambda (y) 1) ((#t (prod#)) 1) ((#f (prod#)) 2)))"),
         fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
@@ -317,7 +356,8 @@ def test_a_lambda_parameter_is_not_a_use():
 
 def test_a_letrec_name_is_not_a_use():
     expanded = expand(
-        read("(match (letrec ((g 1)) 2) ((#t) 1) ((#f) 2))"), fresh=counter()
+        read("(match (letrec ((g 1)) 2) ((#t (prod#)) 1) ((#f (prod#)) 2))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -330,7 +370,9 @@ def test_a_quoted_occurrence_is_not_the_bound_variable():
     expanded = expand(
         read(
             "(lambda (x)"
-            " (match #t ((#t) (quote (match x ((#t) 1) ((#f) 2)))) ((#f) 2)))"
+            " (match #t"
+            "   ((#t (prod#)) (quote (match x ((#t (prod#)) 1) ((#f (prod#)) 2))))"
+            "   ((#f (prod#)) 2)))"
         ),
         fresh=counter(),
     )
@@ -352,7 +394,8 @@ def test_a_program_with_no_if_has_no_conditions():
 
 def test_a_built_in_test_is_lifted_to_its_own_form():
     expanded = expand(
-        read("(lambda (x) (match (lt x 1) ((#t) 2) ((#f) 3)))"), fresh=counter()
+        read("(lambda (x) (match (lt x 1) ((#t (prod#)) 2) ((#f (prod#)) 3)))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -371,7 +414,10 @@ def test_an_ascribed_letrec_name_is_not_a_use():
     # The ascribed twin of `test_a_letrec_name_is_not_a_use`: wrapping the
     # binder must not turn its binding position into an occurrence.
     expanded = expand(
-        read("(match (letrec (((ascribe# g @int) 1)) 2) ((#t) 1) ((#f) 2))"),
+        read(
+            "(match (letrec (((ascribe# g @int) 1)) 2)"
+            " ((#t (prod#)) 1) ((#f (prod#)) 2))"
+        ),
         fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
@@ -386,7 +432,8 @@ def test_an_ascribed_letrec_initializer_is_still_searched():
     expanded = expand(
         read(
             "(lambda (x)"
-            " (match (letrec (((ascribe# g @int) x)) 2) ((#t) 1) ((#f) 2)))"
+            " (match (letrec (((ascribe# g @int) x)) 2)"
+            "  ((#t (prod#)) 1) ((#f (prod#)) 2)))"
         ),
         fresh=counter(),
     )
@@ -423,7 +470,10 @@ def test_an_ascribed_type_operand_is_not_a_use():
     # `@int` is a type spelling, not a program variable: it must not read as
     # an occurrence of a free symbol that happens to share its spelling.
     expanded = expand(
-        read("(match (letrec (((ascribe# g @int) 1)) 2) ((#t) 1) ((#f) 2))"),
+        read(
+            "(match (letrec (((ascribe# g @int) 1)) 2)"
+            " ((#t (prod#)) 1) ((#f (prod#)) 2))"
+        ),
         fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
@@ -434,7 +484,9 @@ def test_an_ascribed_type_operand_is_not_a_use():
 
 
 def test_a_define_name_is_not_a_use():
-    expanded = expand(read("(define g (match g ((#t) 1) ((#f) 2)))"), fresh=counter())
+    expanded = expand(
+        read("(define g (match g ((#t (prod#)) 1) ((#f (prod#)) 2)))"), fresh=counter()
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -444,7 +496,8 @@ def test_a_define_name_is_not_a_use():
 
 def test_an_ascribed_define_name_is_not_a_use():
     expanded = expand(
-        read("(define (ascribe# g @int) (match 1 ((#t) 2) ((#f) 3)))"), fresh=counter()
+        read("(define (ascribe# g @int) (match 1 ((#t (prod#)) 2) ((#f (prod#)) 3)))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)

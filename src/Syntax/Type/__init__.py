@@ -208,8 +208,8 @@ FALSE: Final[Symbol] = Symbol("#f")
 BOOL: Final[SumType] = SumType({TRUE: ProdType(), FALSE: ProdType()})
 
 # The two constructors of `(@list t)`, and the fields a cons cell's payload is
-# written with. A record and not a tuple, so the two operands of a
-# `(cons x xs)` pattern are named where the type is written.
+# written with. A record and not a tuple, so the two fields a
+# `(cons (prod# x xs))` pattern names are named where the type is written too.
 NIL: Final[Symbol] = Symbol("nil")
 CONS: Final[Symbol] = Symbol("cons")
 ELEMENT: Final[Symbol] = Symbol("x")

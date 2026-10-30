@@ -688,8 +688,8 @@ def expand_pattern(
     # A pattern, descended into for its binding positions alone — the role
     # `type_form` plays for a written type. Whether the head of a constructor
     # pattern names a constructor, and whether the operands are written at the
-    # arity its payload has, are later questions; this pass settles only where
-    # the binders are.
+    # arity that constructor has, are later questions; this pass settles only
+    # where the binders are.
     match pattern:
         case SList([]):
             # No constructor is spelled by nothing, and the empty combination

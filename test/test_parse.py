@@ -136,7 +136,9 @@ def test_a_match_parses_positionally_with_a_bare_head():
     # `x` resolve to the one parameter, whatever scopes the clause gave them.
     x = Symbol("x", {Scope(1330)})
 
-    assert pipeline("(lambda (x) (match x ((#t) x) ((#f) x)))", 1330) == SList(
+    assert pipeline(
+        "(lambda (x) (match x ((#t (prod#)) x) ((#f (prod#)) x)))", 1330
+    ) == SList(
         [
             Symbol("lambda"),
             SList([x]),
@@ -144,8 +146,8 @@ def test_a_match_parses_positionally_with_a_bare_head():
                 [
                     Symbol("match"),
                     x,
-                    SList([SList([Symbol("#t")]), x]),
-                    SList([SList([Symbol("#f")]), x]),
+                    SList([SList([Symbol("#t"), SList([Symbol("prod#")])]), x]),
+                    SList([SList([Symbol("#f"), SList([Symbol("prod#")])]), x]),
                 ]
             ),
         ]
@@ -154,9 +156,9 @@ def test_a_match_parses_positionally_with_a_bare_head():
 
 def test_a_pattern_resolves_its_binders_and_keeps_its_constructor():
     # A constructor head resolves as a reference and comes back as itself when
-    # nothing binds it, which is what makes `.` and `list` readable as the
-    # constructors they name.
-    assert pipeline("(match xs ((cons x r) x))", 1332) == SList(
+    # nothing binds it, which is what makes `cons` and the `prod#` its payload
+    # pattern is written with readable as the constructors they name.
+    assert pipeline("(match xs ((cons (prod# x r)) x))", 1332) == SList(
         [
             Symbol("match"),
             Symbol("xs"),
@@ -165,8 +167,13 @@ def test_a_pattern_resolves_its_binders_and_keeps_its_constructor():
                     SList(
                         [
                             Symbol("cons"),
-                            Symbol("x", {Scope(1332)}),
-                            Symbol("r", {Scope(1332)}),
+                            SList(
+                                [
+                                    Symbol("prod#"),
+                                    Symbol("x", {Scope(1332)}),
+                                    Symbol("r", {Scope(1332)}),
+                                ]
+                            ),
                         ]
                     ),
                     Symbol("x", {Scope(1332)}),
