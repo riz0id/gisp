@@ -21,7 +21,7 @@ def counter() -> Callable[[], Scope]:
 
 
 def test_a_reference_in_test_position_is_a_condition():
-    expanded = expand(read("(lambda (x) (if x 1 2))"), fresh=counter())
+    expanded = expand(read("(lambda (x) (match x ((#t) 1) ((#f) 2)))"), fresh=counter())
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -31,7 +31,9 @@ def test_a_reference_in_test_position_is_a_condition():
 
 
 def test_a_reference_in_a_branch_is_not_a_condition():
-    expanded = expand(read("(lambda (x) (if #t x 2))"), fresh=counter())
+    expanded = expand(
+        read("(lambda (x) (match #t ((#t) x) ((#f) 2)))"), fresh=counter()
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -39,7 +41,9 @@ def test_a_reference_in_a_branch_is_not_a_condition():
 
 
 def test_the_whole_test_is_returned_not_the_occurrence():
-    expanded = expand(read("(lambda (f x) (if (f x) 1 2))"), fresh=counter())
+    expanded = expand(
+        read("(lambda (f x) (match (f x) ((#t) 1) ((#f) 2)))"), fresh=counter()
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -53,7 +57,9 @@ def test_the_whole_test_is_returned_not_the_occurrence():
 
 
 def test_a_letrec_bound_reference_in_test_position_is_a_condition():
-    expanded = expand(read("(letrec ((x 1)) (if x 2 3))"), fresh=counter())
+    expanded = expand(
+        read("(letrec ((x 1)) (match x ((#t) 2) ((#f) 3)))"), fresh=counter()
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -63,7 +69,9 @@ def test_a_letrec_bound_reference_in_test_position_is_a_condition():
 
 
 def test_a_letrec_bound_reference_in_a_branch_is_not_a_condition():
-    expanded = expand(read("(letrec ((x 1)) (if #t x 2))"), fresh=counter())
+    expanded = expand(
+        read("(letrec ((x 1)) (match #t ((#t) x) ((#f) 2)))"), fresh=counter()
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -72,7 +80,8 @@ def test_a_letrec_bound_reference_in_a_branch_is_not_a_condition():
 
 def test_a_letrec_bound_application_is_returned_whole():
     expanded = expand(
-        read("(letrec ((f (lambda (y) y)) (x 1)) (if (f x) 2 3))"), fresh=counter()
+        read("(letrec ((f (lambda (y) y)) (x 1)) (match (f x) ((#t) 2) ((#f) 3)))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -83,7 +92,12 @@ def test_a_letrec_bound_application_is_returned_whole():
 
 
 def test_a_letrec_initializer_and_body_are_both_regions():
-    expanded = expand(read("(letrec ((f (if f 1 2))) (if (f 3) 4 5))"), fresh=counter())
+    expanded = expand(
+        read(
+            "(letrec ((f (match f ((#t) 1) ((#f) 2)))) (match (f 3) ((#t) 4) ((#f) 5)))"
+        ),
+        fresh=counter(),
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -97,7 +111,10 @@ def test_a_letrec_initializer_and_body_are_both_regions():
 
 def test_a_letrec_region_spans_sibling_initializers():
     expanded = expand(
-        read("(letrec ((f (if g 1 2)) (g (if f 3 4))) 5)"), fresh=counter()
+        read(
+            "(letrec ((f (match g ((#t) 1) ((#f) 2))) (g (match f ((#t) 3) ((#f) 4)))) 5)"
+        ),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -116,7 +133,9 @@ def test_a_letrec_region_spans_sibling_initializers():
 
 
 def test_a_reference_from_an_enclosing_lambda_is_found():
-    expanded = expand(read("(lambda (x) (lambda (y) (if x 1 2)))"), fresh=counter())
+    expanded = expand(
+        read("(lambda (x) (lambda (y) (match x ((#t) 1) ((#f) 2))))"), fresh=counter()
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -126,7 +145,10 @@ def test_a_reference_from_an_enclosing_lambda_is_found():
 
 
 def test_a_reference_from_an_enclosing_letrec_is_found():
-    expanded = expand(read("(letrec ((x 1)) (lambda (y) (if x 2 3)))"), fresh=counter())
+    expanded = expand(
+        read("(letrec ((x 1)) (lambda (y) (match x ((#t) 2) ((#f) 3))))"),
+        fresh=counter(),
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -136,7 +158,9 @@ def test_a_reference_from_an_enclosing_letrec_is_found():
 
 
 def test_an_adjacent_lambda_shadow_belongs_to_the_inner_binder():
-    expanded = expand(read("(lambda (x) (lambda (x) (if x 1 2)))"), fresh=counter())
+    expanded = expand(
+        read("(lambda (x) (lambda (x) (match x ((#t) 1) ((#f) 2))))"), fresh=counter()
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -150,7 +174,8 @@ def test_an_adjacent_lambda_shadow_belongs_to_the_inner_binder():
 
 def test_a_three_deep_lambda_shadow_belongs_to_the_innermost_binder():
     expanded = expand(
-        read("(lambda (x) (lambda (x) (lambda (x) (if x 1 2))))"), fresh=counter()
+        read("(lambda (x) (lambda (x) (lambda (x) (match x ((#t) 1) ((#f) 2)))))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -164,7 +189,8 @@ def test_a_three_deep_lambda_shadow_belongs_to_the_innermost_binder():
 
 def test_an_interleaved_shadow_belongs_to_its_own_binder():
     expanded = expand(
-        read("(lambda (x) (lambda (y) (lambda (x) (if y 1 2))))"), fresh=counter()
+        read("(lambda (x) (lambda (y) (lambda (x) (match y ((#t) 1) ((#f) 2)))))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -180,7 +206,8 @@ def test_an_interleaved_shadow_belongs_to_its_own_binder():
 
 def test_an_adjacent_letrec_shadow_belongs_to_the_inner_binder():
     expanded = expand(
-        read("(letrec ((x 1)) (letrec ((x 2)) (if x 3 4)))"), fresh=counter()
+        read("(letrec ((x 1)) (letrec ((x 2)) (match x ((#t) 3) ((#f) 4))))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -192,7 +219,10 @@ def test_an_adjacent_letrec_shadow_belongs_to_the_inner_binder():
 
 
 def test_a_letrec_name_shadows_a_lambda_parameter():
-    expanded = expand(read("(lambda (x) (letrec ((x 1)) (if x 2 3)))"), fresh=counter())
+    expanded = expand(
+        read("(lambda (x) (letrec ((x 1)) (match x ((#t) 2) ((#f) 3))))"),
+        fresh=counter(),
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -203,7 +233,10 @@ def test_a_letrec_name_shadows_a_lambda_parameter():
 
 
 def test_a_lambda_parameter_shadows_a_letrec_name():
-    expanded = expand(read("(letrec ((x 1)) (lambda (x) (if x 2 3)))"), fresh=counter())
+    expanded = expand(
+        read("(letrec ((x 1)) (lambda (x) (match x ((#t) 2) ((#f) 3))))"),
+        fresh=counter(),
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -216,20 +249,34 @@ def test_a_lambda_parameter_shadows_a_letrec_name():
 # -- traversal -----------------------------------------------------------------
 
 
-def test_a_nested_if_in_a_test_has_a_condition_of_its_own():
-    expanded = expand(read("(lambda (x) (if (if x 1 2) 3 4))"), fresh=counter())
+def test_a_nested_match_in_a_scrutinee_has_a_condition_of_its_own():
+    expanded = expand(
+        read("(lambda (x) (match (match x ((#t) 1) ((#f) 2)) ((#t) 3) ((#f) 4)))"),
+        fresh=counter(),
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
-    assert conditions(Symbol("x", {Scope(0)}), program, table) == [
-        ListCExpr([Symbol("if"), Symbol("x", {Scope(0)}), Integer(1), Integer(2)]),
-        VarCExpr(Symbol("x", {Scope(0)})),
+    x = Symbol("x", {Scope(0)})
+    inner = [
+        Symbol("match"),
+        x,
+        SList([SList([Symbol("#t")]), Integer(1)]),
+        SList([SList([Symbol("#f")]), Integer(2)]),
     ]
+
+    # The outer scrutinee is the whole inner `match`, which the condition
+    # language has no constructor for and reads as the opaque list it is; the
+    # inner scrutinee is the variable.
+    assert conditions(x, program, table) == [ListCExpr(inner), VarCExpr(x)]
 
 
 def test_sibling_conditions_come_out_in_source_order():
     expanded = expand(
-        read("(lambda (f g h x) (f (if (g x) 1 2) (if (h x) 3 4)))"), fresh=counter()
+        read(
+            "(lambda (f g h x) (f (match (g x) ((#t) 1) ((#f) 2)) (match (h x) ((#t) 3) ((#f) 4))))"
+        ),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -241,7 +288,12 @@ def test_sibling_conditions_come_out_in_source_order():
 
 
 def test_equal_tests_are_reported_once_per_if():
-    expanded = expand(read("(lambda (f x) (f (if x 1 2) (if x 3 4)))"), fresh=counter())
+    expanded = expand(
+        read(
+            "(lambda (f x) (f (match x ((#t) 1) ((#f) 2)) (match x ((#t) 3) ((#f) 4))))"
+        ),
+        fresh=counter(),
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -252,7 +304,10 @@ def test_equal_tests_are_reported_once_per_if():
 
 
 def test_a_lambda_parameter_is_not_a_use():
-    expanded = expand(read("(lambda (x) (if (lambda (y) 1) 1 2))"), fresh=counter())
+    expanded = expand(
+        read("(lambda (x) (match (lambda (y) 1) ((#t) 1) ((#f) 2)))"),
+        fresh=counter(),
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -261,7 +316,9 @@ def test_a_lambda_parameter_is_not_a_use():
 
 
 def test_a_letrec_name_is_not_a_use():
-    expanded = expand(read("(if (letrec ((g 1)) 2) 1 2)"), fresh=counter())
+    expanded = expand(
+        read("(match (letrec ((g 1)) 2) ((#t) 1) ((#f) 2))"), fresh=counter()
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -271,7 +328,11 @@ def test_a_letrec_name_is_not_a_use():
 
 def test_a_quoted_occurrence_is_not_the_bound_variable():
     expanded = expand(
-        read("(lambda (x) (if #t (quote (if x 1 2)) 2))"), fresh=counter()
+        read(
+            "(lambda (x)"
+            " (match #t ((#t) (quote (match x ((#t) 1) ((#f) 2)))) ((#f) 2)))"
+        ),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -290,7 +351,9 @@ def test_a_program_with_no_if_has_no_conditions():
 
 
 def test_a_built_in_test_is_lifted_to_its_own_form():
-    expanded = expand(read("(lambda (x) (if (lt x 1) 2 3))"), fresh=counter())
+    expanded = expand(
+        read("(lambda (x) (match (lt x 1) ((#t) 2) ((#f) 3)))"), fresh=counter()
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -308,7 +371,8 @@ def test_an_ascribed_letrec_name_is_not_a_use():
     # The ascribed twin of `test_a_letrec_name_is_not_a_use`: wrapping the
     # binder must not turn its binding position into an occurrence.
     expanded = expand(
-        read("(if (letrec (((ascribe# g @int) 1)) 2) 1 2)"), fresh=counter()
+        read("(match (letrec (((ascribe# g @int) 1)) 2) ((#t) 1) ((#f) 2))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -320,7 +384,10 @@ def test_an_ascribed_letrec_initializer_is_still_searched():
     # The fix must not lose the initializer while dropping the binder: `x` is
     # used inside the initializer of an ascribed binding.
     expanded = expand(
-        read("(lambda (x) (if (letrec (((ascribe# g @int) x)) 2) 1 2))"),
+        read(
+            "(lambda (x)"
+            " (match (letrec (((ascribe# g @int) x)) 2) ((#t) 1) ((#f) 2)))"
+        ),
         fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
@@ -356,7 +423,8 @@ def test_an_ascribed_type_operand_is_not_a_use():
     # `@int` is a type spelling, not a program variable: it must not read as
     # an occurrence of a free symbol that happens to share its spelling.
     expanded = expand(
-        read("(if (letrec (((ascribe# g @int) 1)) 2) 1 2)"), fresh=counter()
+        read("(match (letrec (((ascribe# g @int) 1)) 2) ((#t) 1) ((#f) 2))"),
+        fresh=counter(),
     )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
@@ -366,7 +434,7 @@ def test_an_ascribed_type_operand_is_not_a_use():
 
 
 def test_a_define_name_is_not_a_use():
-    expanded = expand(read("(define g (if g 1 2))"), fresh=counter())
+    expanded = expand(read("(define g (match g ((#t) 1) ((#f) 2)))"), fresh=counter())
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 
@@ -375,7 +443,9 @@ def test_a_define_name_is_not_a_use():
 
 
 def test_an_ascribed_define_name_is_not_a_use():
-    expanded = expand(read("(define (ascribe# g @int) (if 1 2 3))"), fresh=counter())
+    expanded = expand(
+        read("(define (ascribe# g @int) (match 1 ((#t) 2) ((#f) 3)))"), fresh=counter()
+    )
     program = parse(expanded, bindings(expanded))
     table = bindings(program)
 

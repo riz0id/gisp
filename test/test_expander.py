@@ -3,7 +3,7 @@ from itertools import count
 
 import pytest
 
-from Expander import ExpandError, expand
+from Expander import KEYWORDS, ExpandError, expand
 from Reader import read
 from Resolve import Unbound, bindings, resolve
 from Syntax import Integer, Scope, SList, Symbol
@@ -100,16 +100,115 @@ def test_a_lambda_parameter_shadows_a_letrec_binder():
     assert resolve(Symbol("f", {Scope(915)}), table).binder == letrec_binder
 
 
-def test_if_introduces_no_scope():
-    # The branches stay in the enclosing region: every occurrence carries
-    # exactly the lambda's scope, and the keyword carries the same context.
-    expanded = expand(read("(lambda (x) (if x x x))"), fresh=counter(920))
-
-    occurrence = Symbol("x", {Scope(920)})
-    expected_body = SList(
-        [Symbol("if", {Scope(920)}), occurrence, occurrence, occurrence]
+def test_a_boolean_match_scopes_each_clause_separately():
+    # The shape an `if` used to be written as, now written as what it is.
+    #
+    # Each clause is a region, so each body carries the clause's own scope
+    # beside the lambda's. A pattern is not a region: its constructor head is
+    # an identifier of the enclosing one and carries only the lambda's scope,
+    # which is what lets resolution decide whether the spelling names a
+    # constructor or a binding the program made.
+    expanded = expand(
+        read("(lambda (x) (match x ((#t) x) ((#f) x)))"), fresh=counter(920)
     )
-    assert expanded == SList([Symbol("lambda"), SList([occurrence]), expected_body])
+
+    parameter = Symbol("x", {Scope(920)})
+
+    assert expanded == SList(
+        [
+            Symbol("lambda"),
+            SList([parameter]),
+            SList(
+                [
+                    Symbol("match", {Scope(920)}),
+                    Symbol("x", {Scope(920)}),
+                    SList(
+                        [
+                            SList([Symbol("#t", {Scope(920)})]),
+                            Symbol("x", {Scope(920), Scope(921)}),
+                        ]
+                    ),
+                    SList(
+                        [
+                            SList([Symbol("#f", {Scope(920)})]),
+                            Symbol("x", {Scope(920), Scope(922)}),
+                        ]
+                    ),
+                ]
+            ),
+        ]
+    )
+
+
+def test_if_is_not_a_form_of_the_language():
+    # `match` is the only branching form, so `if` names nothing: the spelling
+    # is an ordinary identifier, bindable like any other, and a form headed by
+    # it is an application.
+    assert "if" not in KEYWORDS
+
+    expanded = expand(read("(lambda (if) (if 1 2 3))"), fresh=counter(926))
+    bound = Symbol("if", {Scope(926)})
+
+    assert expanded == SList(
+        [
+            Symbol("lambda"),
+            SList([bound]),
+            SList([bound, Integer(1), Integer(2), Integer(3)]),
+        ]
+    )
+
+
+def test_each_match_clause_is_a_region_of_its_own():
+    # The one hygiene shape no other form has. `lambda` and `letrec` mint one
+    # scope for the whole form because their binders share one region; two
+    # clauses are two regions, so two clauses binding the one spelling are two
+    # distinct binders.
+    expanded = expand(read("(match xs ((cons x r) x) ((nil) x))"), fresh=counter(930))
+
+    assert expanded == SList(
+        [
+            Symbol("match"),
+            Symbol("xs"),
+            SList(
+                [
+                    SList(
+                        [
+                            Symbol("cons"),
+                            Symbol("x", {Scope(930)}),
+                            Symbol("r", {Scope(930)}),
+                        ]
+                    ),
+                    Symbol("x", {Scope(930)}),
+                ]
+            ),
+            SList([SList([Symbol("nil")]), Symbol("x", {Scope(931)})]),
+        ]
+    )
+
+
+def test_a_pattern_binder_takes_an_ascription():
+    # A pattern binder is scoped exactly as a lambda parameter is, type operand
+    # and all: the clause mints 935 and the type operand its own 936.
+    expanded = expand(read("(match n ((ascribe# m @int) m))"), fresh=counter(935))
+
+    assert expanded == SList(
+        [
+            Symbol("match"),
+            Symbol("n"),
+            SList(
+                [
+                    SList(
+                        [
+                            Symbol("ascribe#"),
+                            Symbol("m", {Scope(935)}),
+                            Symbol("@int", {Scope(936)}),
+                        ]
+                    ),
+                    Symbol("m", {Scope(935)}),
+                ]
+            ),
+        ]
+    )
 
 
 def test_quote_passes_through_untouched():
@@ -132,11 +231,10 @@ def test_quote_passes_through_untouched():
     [
         "(lambda (x x) x)",
         "(letrec ((f f) (f f)) f)",
-        "(lambda (if) if)",
+        "(lambda (match) match)",
         "(letrec ((lambda (lambda (x) x))) x)",
         "(lambda x x)",
         "(lambda (x))",
-        "(if x x)",
         "(letrec ((f)) f)",
         "(letrec (f) f)",
         "(lambda ((ascribe# x)) x)",
@@ -151,6 +249,14 @@ def test_quote_passes_through_untouched():
         "(define x 1 2)",
         "(lambda (define) define)",
         "(letrec ((define 5)) define)",
+        "(match)",
+        "(match n)",
+        "(match n (p))",
+        "(match n (p b c))",
+        "(match n (() b))",
+        "(match n ((cons x x) b))",
+        "(lambda (match) match)",
+        "(letrec ((match 5)) match)",
     ],
 )
 def test_malformed_core_forms_are_refused(source: str):
@@ -365,7 +471,7 @@ def test_a_nested_define_is_refused():
         expand(read("(lambda (x) (define x 5))"), fresh=counter(963))
 
     with pytest.raises(ExpandError):
-        expand(read("(if 1 (define y 5) 2)"), fresh=counter(964))
+        expand(read("(match 1 ((#t) (define y 5)) ((#f) 2))"), fresh=counter(964))
 
 
 def test_an_ascribed_macro_name_is_refused():
@@ -487,3 +593,65 @@ def test_nested_type_binders_of_one_identifier_are_distinct():
 def test_malformed_type_binders_are_refused(source: str):
     with pytest.raises(ExpandError):
         expand(read(source))
+
+
+# -- free variables --------------------------------------------------------------
+
+
+def test_forall_mints_a_scopeless_binder():
+    # The form is the binding position and the only occurrence of what it
+    # binds, so it opens no region and mints no scope. Its binder is free in
+    # the whole program and carries nothing. The type operand is a region of
+    # its own, and takes the one scope every ascribed type takes.
+    expanded = expand(read("(forall (ascribe# n @int))"), fresh=counter(980))
+
+    assert expanded == SList(
+        [
+            Symbol("forall"),
+            SList(
+                [
+                    Symbol("ascribe#"),
+                    Symbol("n"),
+                    Symbol("@int", {Scope(980)}),
+                ]
+            ),
+        ]
+    )
+    assert list(bindings(expanded)) == [Symbol("n")]
+
+
+def test_two_occurrences_at_two_depths_mint_the_one_binder():
+    # The scopes a written occurrence has acquired are the enclosing regions',
+    # and keeping them would make these two occurrences binders with
+    # incomparable scope sets: two variables where the program wrote one, and
+    # an ambiguous reference to either. Both mint the bare `n`.
+    source = read(
+        "(lt (forall (ascribe# n @int)) (lambda (x) (forall (ascribe# n @int))))"
+    )
+    table = bindings(expand(source, fresh=counter(985)))
+
+    assert [b for b in table if b.identifier == "n"] == [Symbol("n")]
+
+    # So a reference reaches it from inside the lambda as readily as outside.
+    assert resolve(Symbol("n", {Scope(985)}), table).binder == Symbol("n")
+    assert resolve(Symbol("n"), table).binder == Symbol("n")
+
+
+def test_a_free_variable_must_be_ascribed():
+    # Nothing encloses the binder, so there is nowhere else its type could
+    # have been written.
+    with pytest.raises(ExpandError):
+        expand(read("(forall n)"), fresh=counter(988))
+
+
+def test_a_malformed_forall_is_refused():
+    for source in ["(forall)", "(forall (ascribe# n @int) 1)", "(forall (ascribe# n))"]:
+        with pytest.raises(ExpandError):
+            expand(read(source), fresh=counter(990))
+
+
+def test_forall_cannot_be_shadowed():
+    # A keyword, so no binder may take its spelling and no macro may be bound
+    # to it — the refusal every core form shares.
+    with pytest.raises(ExpandError):
+        expand(read("(lambda (forall) forall)"), fresh=counter(995))

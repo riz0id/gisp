@@ -1,31 +1,35 @@
 (define (ascribe# append
                   (@fun (@prod (@list @int) (@list @int)) (@list @int)))
   (lambda ((ascribe# xs (@list @int)) (ascribe# ys (@list @int)))
-    (if (eq xs '())
-        ys
-        (. (head xs) (append (tail xs) ys)))))
+    (match xs
+      ((nil) ys)
+      ((cons x rest) (cons (prod# x (append rest ys)))))))
 
 (define (ascribe# keep-le (@fun (@prod @int (@list @int)) (@list @int)))
   (lambda ((ascribe# p @int) (ascribe# xs (@list @int)))
-    (if (eq xs '())
-        xs
-        (if (le (head xs) p)
-            (. (head xs) (keep-le p (tail xs)))
-            (keep-le p (tail xs))))))
+    (match xs
+      ((nil) xs)
+      ((cons x rest)
+       (match (le x p)
+         ((#t) (cons (prod# x (keep-le p rest))))
+         ((#f) (keep-le p rest)))))))
 
 (define (ascribe# keep-gt (@fun (@prod @int (@list @int)) (@list @int)))
   (lambda ((ascribe# p @int) (ascribe# xs (@list @int)))
-    (if (eq xs '())
-        xs
-        (if (le (head xs) p)
-            (keep-gt p (tail xs))
-            (. (head xs) (keep-gt p (tail xs)))))))
+    (match xs
+      ((nil) xs)
+      ((cons x rest)
+       (match (le x p)
+         ((#t) (keep-gt p rest))
+         ((#f) (cons (prod# x (keep-gt p rest)))))))))
 
 (define (ascribe# sort (@fun (@prod (@list @int)) (@list @int)))
   (lambda ((ascribe# xs (@list @int)))
-    (if (le (len xs) 1)
-        xs
-        (append (sort (keep-le (head xs) (tail xs)))
-                (. (head xs) (sort (keep-gt (head xs) (tail xs))))))))
+    (match xs
+      ((nil) xs)
+      ((cons x (nil)) xs)
+      ((cons x rest)
+       (append (sort (keep-le x rest))
+               (cons (prod# x (sort (keep-gt x rest)))))))))
 
 (sort '(3 1 4 1 5 9 2 6))

@@ -2,7 +2,7 @@ import pytest
 
 from Evaluate import BUILTINS, Environment, EvalError, Value, evaluate_toplevel
 from Reader import read_all
-from Syntax import Integer, SList, Symbol
+from Syntax import Integer, Symbol, listed
 
 
 def run(source: str) -> Value | None:
@@ -24,9 +24,9 @@ def test_the_init_is_evaluated():
 def test_a_defined_procedure_is_self_recursive():
     source = """
     (define last (lambda (xs)
-                   (if (le (len xs) 1)
-                       (head xs)
-                       (last (tail xs)))))
+                   (match xs
+                     ((cons x (nil)) x)
+                     ((cons x rest) (last rest)))))
     (last '(1 2 3))
     """
     assert run(source) == Integer(3)
@@ -45,7 +45,9 @@ def test_a_define_form_yields_no_value():
 
 
 def test_a_quoted_define_is_data():
-    assert run("'(define x 5)") == SList([Symbol("define"), Symbol("x"), Integer(5)])
+    assert run("'(define x 5)") == listed(
+        [Symbol("define"), Symbol("x"), Integer(5)]
+    )
 
 
 @pytest.mark.parametrize(
@@ -92,7 +94,9 @@ def test_an_ascribed_defined_procedure_is_self_recursive():
     source = """
     (define (ascribe# fact @int)
       (lambda ((ascribe# n @int))
-        (if (eq n 0) 1 (* n (fact (- n 1))))))
+        (match n
+          (0 1)
+          (m (* m (fact (- m 1)))))))
     (fact 5)
     """
     assert run(source) == Integer(120)

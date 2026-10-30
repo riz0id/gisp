@@ -2,7 +2,6 @@ from collections.abc import Callable
 from itertools import count
 
 from Analysis.CExpr import (
-    BooleanCExpr,
     CExpr,
     CharCExpr,
     ComparisonCExpr,
@@ -12,13 +11,12 @@ from Analysis.CExpr import (
     IntegerCExpr,
     ListCExpr,
     NegationCExpr,
-    NilCExpr,
     VarCExpr,
 )
 from Expander import expand, parse
 from Reader import read
 from Resolve import BindingTable, bindings
-from Syntax import Boolean, Char, Expr, Integer, Nil, Scope, SList, Symbol
+from Syntax import Char, Expr, Integer, Scope, SList, Symbol
 
 
 def counter() -> Callable[[], Scope]:
@@ -110,10 +108,10 @@ def test_a_negated_operand_is_converted_too():
 def test_a_built_in_is_recognized_with_no_store_of_its_own():
     # The five operators are in the store this conversion builds, so a caller
     # with nothing to say about bindings still gets the forms.
-    expr = SList([Symbol("and"), Boolean(True), Boolean(False)])
+    expr = SList([Symbol("and"), Symbol("#t"), Symbol("#f")])
 
     assert CExpr.from_expr(expr) == ConjunctionCExpr(
-        BooleanCExpr(Boolean(True)), BooleanCExpr(Boolean(False))
+        VarCExpr(Symbol("#t")), VarCExpr(Symbol("#f"))
     )
 
 
@@ -210,14 +208,6 @@ def test_a_character_is_a_character_literal():
     assert CExpr.from_expr(Char(ord("a"))) == CharCExpr(Char(ord("a")))
 
 
-def test_a_boolean_is_a_boolean_literal():
-    assert CExpr.from_expr(Boolean(True)) == BooleanCExpr(Boolean(True))
-
-
-def test_nil_is_a_nil_literal():
-    assert CExpr.from_expr(Nil()) == NilCExpr()
-
-
 def test_a_symbol_is_a_variable():
     assert CExpr.from_expr(Symbol("x", {Scope(0)})) == VarCExpr(Symbol("x", {Scope(0)}))
 
@@ -239,7 +229,7 @@ def test_a_form_with_a_variable_round_trips():
 
 
 def test_the_leaves_round_trip():
-    for expr in [Integer(1), Char(ord("a")), Boolean(True), Nil(), Symbol("x")]:
+    for expr in [Integer(1), Char(ord("a")), Symbol("x")]:
         assert CExpr.from_expr(expr).to_expr() == expr
 
 
@@ -256,3 +246,16 @@ def test_the_callers_store_is_left_alone():
 
     assert len(store) == before
     assert Symbol("and") not in store
+
+
+def test_a_free_variable_converts_to_the_variable_it_binds():
+    # A `forall` is an occurrence of what it binds, and the condition language
+    # reads it as that variable. Its reading has to precede the unary operator
+    # arm's: the form is itself a two-item list, and an application of `forall`
+    # is a condition nothing can read.
+    guard = program("(lt (forall (ascribe# n @int)) 5)")
+
+    assert CExpr.from_expr(guard) == ComparisonCExpr(
+        VarCExpr(Symbol("n")),
+        IntegerCExpr(Integer(5)),
+    )

@@ -10,11 +10,10 @@ from Reader import read
 from Resolve import BindingTable, bindings
 from Syntax import Expr, Scope, Symbol
 from Syntax.Type import (
-    BoolType,
+    BOOL,
     Context,
     FunType,
     IntType,
-    ListType,
     MuType,
     ProdType,
     SumType,
@@ -22,8 +21,10 @@ from Syntax.Type import (
     VariadicType,
     VarType,
     constructor_arity,
+    constructors,
     is_constructor,
     is_nullary_type,
+    list_of,
     type_constructor_arity,
     type_constructor_symbol,
     unfold,
@@ -105,8 +106,8 @@ def test_unfolding_leaves_the_recursive_positions_folded():
 
 
 def test_unfolding_descends_through_every_sort_that_has_parts():
-    element = MuType(A, ListType(VarType(A)))
-    assert unfold(element) == ListType(element)
+    element = MuType(A, list_of(VarType(A)))
+    assert unfold(element) == list_of(element)
 
     arguments = MuType(
         A,
@@ -163,7 +164,7 @@ def test_a_recursive_sum_is_constructed_to_any_depth():
 
 
 def test_a_payload_off_the_recursive_type_is_refused():
-    program, table = program_of("(succ #t)", 1605)
+    program, table = program_of("(succ (#t (prod#)))", 1605)
 
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).check(program, nat())
@@ -184,7 +185,7 @@ def test_a_recursive_list_checks_fieldwise_at_every_depth():
 
 
 def test_an_element_off_the_recursive_list_is_refused():
-    program, table = program_of("(cons (prod# #t (nil (prod#))))", 1611)
+    program, table = program_of("(cons (prod# (#t (prod#)) (nil (prod#))))", 1611)
 
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).check(program, ints())
@@ -267,21 +268,28 @@ def test_a_variable_reports_the_type_it_is_bound_to():
 
 
 def test_a_variable_bound_to_a_compound_type_reports_its_arity():
-    # The reading that zero cannot express: an element type is one type
-    # argument however the variable standing for it is spelled.
-    store: Context = Context.default().bind(A, ListType(IntType()))
+    # The reading that zero cannot express: a variable answers for the type
+    # bound to it, whatever that type answers. `(@list t)` is the `@mu` over a
+    # sum, so these are the `@mu` and `SumType` answers and not a sort of
+    # their own — one type argument, and one payload per constructor.
+    store: Context = Context.default().bind(A, list_of(IntType()))
 
-    assert type_constructor_symbol(VarType(A), store) == Symbol("@list")
+    assert type_constructor_symbol(VarType(A), store) == Symbol("@mu")
     assert type_constructor_arity(VarType(A), store) == 1
-    assert constructor_arity(VarType(A), store) is None
+    assert constructor_arity(VarType(A), store) == 1
 
 
 def test_a_variable_is_constructed_however_its_binding_is():
-    store: Context = Context.default().bind(A, ListType(IntType()))
+    store: Context = Context.default().bind(A, list_of(IntType()))
     table: BindingTable = BindingTable.default()
 
-    assert is_constructor(VarType(A), Symbol("list"), store, table)
+    assert is_constructor(VarType(A), Symbol("cons"), store, table)
+    assert is_constructor(VarType(A), Symbol("nil"), store, table)
     assert not is_constructor(VarType(A), Symbol("prod#"), store, table)
+    # `list` and `.` construct nothing: the sum names its two constructors,
+    # and neither of these is one of them.
+    assert not is_constructor(VarType(A), Symbol("list"), store, table)
+    assert not is_constructor(VarType(A), Symbol("."), store, table)
 
 
 def test_a_variable_bound_to_a_ground_type_is_nullary():
@@ -295,7 +303,7 @@ def test_a_variable_bound_to_a_ground_type_is_nullary():
 
 
 def test_a_variable_bound_to_a_compound_type_is_not_nullary():
-    store: Context = Context.default().bind(A, ListType(IntType()))
+    store: Context = Context.default().bind(A, list_of(IntType()))
 
     assert not is_nullary_type(VarType(A), store)
 
@@ -321,9 +329,15 @@ def test_an_inner_binding_shadows_an_outer_one():
     # `bind` extends functionally, so an inner `@mu` of the same variable
     # shadows the outer binding instead of conflicting with it the way
     # `register` would.
-    store: Context = Context.default().bind(A, nat()).bind(A, ListType(IntType()))
+    store: Context = Context.default().bind(A, nat()).bind(A, list_of(IntType()))
 
-    assert type_constructor_symbol(VarType(A), store) == Symbol("@list")
+    # Both bindings are a `@mu`, so the constructors are what tell them apart:
+    # the variable reads through to the list's two and not to `nat`'s.
+    assert constructors(VarType(A), store) is not None
+    assert set(constructors(VarType(A), store) or {}) == {
+        Symbol("cons"),
+        Symbol("nil"),
+    }
 
 
 def test_the_constructors_are_read_under_the_binding_the_mu_makes():
@@ -367,5 +381,5 @@ def test_a_recursive_type_is_disjoint_from_nothing():
     # A recursive type is not a ground type, so the analysis stays
     # conservative and no branch is read as dead on account of one.
     assert not disjoint(nat(), IntType())
-    assert not disjoint(BoolType(), nat())
+    assert not disjoint(BOOL, nat())
     assert not disjoint(nat(), ints())

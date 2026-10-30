@@ -1,16 +1,18 @@
 (define (ascribe# pass (@fun (@prod (@list @int)) (@list @int)))
   (lambda ((ascribe# xs (@list @int)))
-    (if (le (len xs) 1)
-        xs
-        (if (le (head xs) (head (tail xs)))
-            (. (head xs) (pass (tail xs)))
-            (. (head (tail xs)) (pass (. (head xs) (tail (tail xs)))))))))
+    (match xs
+      ((nil) xs)
+      ((cons x (nil)) xs)
+      ((cons x (cons y ys))
+       (match (le x y)
+         ((#t) (cons (prod# x (pass (cons (prod# y ys))))))
+         ((#f) (cons (prod# y (pass (cons (prod# x ys)))))))))))
 
 (define (ascribe# sort (@fun (@prod (@list @int)) (@list @int)))
   (lambda ((ascribe# xs (@list @int)))
     (letrec (((ascribe# ys (@list @int)) (pass xs)))
-      (if (eq xs ys)
-          xs
-          (sort ys)))))
+      (match (eq xs ys)
+        ((#t) xs)
+        ((#f) (sort ys))))))
 
 (sort '(3 1 4 1 5 9 2 6))

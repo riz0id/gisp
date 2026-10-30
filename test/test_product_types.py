@@ -3,7 +3,7 @@ import pytest
 from Resolve import BindingTable
 from Syntax import Symbol
 from Syntax.Type import (
-    BoolType,
+    BOOL,
     CharType,
     Context,
     IntType,
@@ -20,19 +20,19 @@ from Syntax.Type import (
 
 
 def test_a_tuple_reports_its_types_in_order_and_has_no_names():
-    ty = ProdType([IntType(), BoolType()])
+    ty = ProdType([IntType(), BOOL])
 
     assert not ty.is_record()
     assert ty.names() is None
-    assert ty.types() == (IntType(), BoolType())
+    assert ty.types() == (IntType(), BOOL)
 
 
 def test_a_record_reports_both_its_names_and_its_types_in_order():
-    ty = ProdType({Symbol("a"): IntType(), Symbol("b"): BoolType()})
+    ty = ProdType({Symbol("a"): IntType(), Symbol("b"): BOOL})
 
     assert ty.is_record()
     assert ty.names() == (Symbol("a"), Symbol("b"))
-    assert ty.types() == (IntType(), BoolType())
+    assert ty.types() == (IntType(), BOOL)
 
 
 def test_a_tuple_and_a_record_over_the_same_types_are_different_types():
@@ -43,8 +43,8 @@ def test_a_tuple_and_a_record_over_the_same_types_are_different_types():
 
 
 def test_a_tuples_equality_is_positional():
-    assert ProdType([IntType(), BoolType()]) != ProdType([BoolType(), IntType()])
-    assert ProdType([IntType(), BoolType()]) == ProdType([IntType(), BoolType()])
+    assert ProdType([IntType(), BOOL]) != ProdType([BOOL, IntType()])
+    assert ProdType([IntType(), BOOL]) == ProdType([IntType(), BOOL])
 
 
 def test_equal_products_of_either_shape_hash_equal():
@@ -80,8 +80,8 @@ def test_the_nullary_product_is_not_a_nullary_type():
 @pytest.mark.parametrize(
     "ty",
     [
-        ProdType([IntType(), BoolType()]),
-        ProdType({Symbol("a"): IntType(), Symbol("b"): BoolType()}),
+        ProdType([IntType(), BOOL]),
+        ProdType({Symbol("a"): IntType(), Symbol("b"): BOOL}),
     ],
 )
 def test_both_arities_count_the_fields_of_either_shape(ty: ProdType):
@@ -94,13 +94,13 @@ def test_both_arities_count_the_fields_of_either_shape(ty: ProdType):
 
 
 def test_rebuilding_a_tuple_keeps_it_a_tuple():
-    rebuilt = ProdType([IntType(), BoolType()]).with_types([CharType(), IntType()])
+    rebuilt = ProdType([IntType(), BOOL]).with_types([CharType(), IntType()])
 
     assert rebuilt == ProdType([CharType(), IntType()])
 
 
 def test_rebuilding_a_record_keeps_its_names_in_order():
-    ty = ProdType({Symbol("a"): IntType(), Symbol("b"): BoolType()})
+    ty = ProdType({Symbol("a"): IntType(), Symbol("b"): BOOL})
     rebuilt = ty.with_types([CharType(), IntType()])
 
     assert rebuilt == ProdType({Symbol("a"): CharType(), Symbol("b"): IntType()})
@@ -112,7 +112,7 @@ def test_rebuilding_a_record_keeps_its_names_in_order():
 )
 def test_rebuilding_from_the_wrong_number_of_types_is_an_error(ty: ProdType):
     with pytest.raises(ValueError):
-        ty.with_types([IntType(), BoolType()])
+        ty.with_types([IntType(), BOOL])
 
 
 # -- the caller's collection ------------------------------------------------------
@@ -121,13 +121,13 @@ def test_rebuilding_from_the_wrong_number_of_types_is_an_error(ty: ProdType):
 def test_a_product_does_not_change_when_the_caller_mutates_what_built_it():
     names: dict[Symbol, Type] = {Symbol("a"): IntType()}
     record = ProdType(names)
-    names[Symbol("b")] = BoolType()
+    names[Symbol("b")] = BOOL
 
     assert record == ProdType({Symbol("a"): IntType()})
 
     types: list[Type] = [IntType()]
     anonymous = ProdType(types)
-    types.append(BoolType())
+    types.append(BOOL)
 
     assert anonymous == ProdType([IntType()])
 

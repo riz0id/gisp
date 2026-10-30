@@ -1,4 +1,3 @@
-from abc import ABC
 from dataclasses import dataclass
 
 __all__: list[str] = ["ConstructorArity", "Type"]

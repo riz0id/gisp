@@ -4,11 +4,9 @@ from typing import Final
 
 from Resolve import BindingTable, meaning
 from Syntax import Char, Expr, Integer, Symbol
-from Syntax.Type.BoolType import BoolType
 from Syntax.Type.CharType import CharType
 from Syntax.Type.FunType import FunType
 from Syntax.Type.IntType import IntType
-from Syntax.Type.ListType import ListType
 from Syntax.Type.MuType import MuType
 from Syntax.Type.ProdType import ProdType
 from Syntax.Type.Scheme import Scheme
@@ -18,17 +16,19 @@ from Syntax.Type.VariadicType import VariadicStarType, VariadicType
 from Syntax.Type.VarType import VarType
 
 __all__: list[str] = [
-    "BoolType",
     "CharType",
     "ABSTRACTION",
+    "BOOL",
+    "CONS",
     "CONSTRUCTORS",
-    "LIST",
+    "FALSE",
+    "NIL",
     "PRODUCT",
+    "TRUE",
     "ConstructorArity",
     "Context",
     "FunType",
     "IntType",
-    "ListType",
     "MuType",
     "ProdType",
     "Scheme",
@@ -38,9 +38,11 @@ __all__: list[str] = [
     "VariadicStarType",
     "VariadicType",
     "constructor_arity",
+    "constructors",
     "guarded",
     "is_constructor",
     "is_nullary_type",
+    "list_of",
     "meaning",
     "solve",
     "substitute",
@@ -55,9 +57,11 @@ def type_constructor_arity(ty: Type, context: Context) -> int:
     # How many type arguments `ty`'s own constructor is written with, which is
     # not the same as how many arguments construct a term of it.
     match ty:
-        case IntType() | CharType() | BoolType():
+        case IntType() | CharType():
             # A nullary constructor takes no type arguments, and thus has
-            # arity zero.
+            # arity zero. `@bool` is not among them: it is written as a bare
+            # symbol but denotes a sum, and this answers about the type and not
+            # the spelling it was reached through.
             return 0
         case VarType(binder=binder) if binder in context.rigid:
             # An abstract variable denotes no one type, so there is no arity to
@@ -71,9 +75,6 @@ def type_constructor_arity(ty: Type, context: Context) -> int:
             # answers. Zero here would be the arity of the name `a`, not of
             # what `a` denotes.
             return type_constructor_arity(context.variable(binder), context)
-        case ListType():
-            # `(@list t)` takes exactly one type argument: the element type.
-            return 1
         case VariadicType() | VariadicStarType():
             # `(@variadic t)` and `(@variadic* t)` take exactly one type
             # argument: the argument type.
@@ -105,10 +106,6 @@ def type_constructor_symbol(ty: Type, context: Context) -> Symbol:
             return Symbol(identifier="@int")
         case CharType():
             return Symbol(identifier="@char")
-        case BoolType():
-            return Symbol(identifier="@bool")
-        case ListType():
-            return Symbol(identifier="@list")
         case SumType():
             return Symbol(identifier="@sum")
         case ProdType():
@@ -141,9 +138,11 @@ def constructor_arity(ty: Type, context: Context) -> ConstructorArity:
     # How many arguments construct a term of `ty`, or `None` where the
     # constructor is written with an ellipsis and so has no bounded arity.
     match ty:
-        case IntType() | CharType() | BoolType():
-            # Literals have zero-arity, meaning the constructor (some integer,
-            # character, or boolean literal) has no arguments.
+        case IntType() | CharType():
+            # Literals have zero-arity, meaning the constructor (some integer
+            # or character literal) has no arguments. A boolean is not among
+            # them: `@bool` is a sum, and a sum constructor is written applied
+            # to its payload.
             return 0
         case VarType(binder=binder) if binder in context.rigid:
             # Nothing constructs an abstract type: a term of it would have to
@@ -155,10 +154,6 @@ def constructor_arity(ty: Type, context: Context) -> ConstructorArity:
         case VarType(binder=binder):
             # A type variable is constructed however the type bound to it is.
             return constructor_arity(context.variable(binder), context)
-        case ListType():
-            # The `(list#x ...)` constructor has no bounded arity (because of
-            # the ellipsis).
-            return None
         case VariadicType() | VariadicStarType():
             # A variadic run has no bounded arity.
             return None
@@ -190,11 +185,80 @@ def constructor_arity(ty: Type, context: Context) -> ConstructorArity:
 # Named once each, because `is_constructor` compares a resolved head against the
 # one its sort expects while a reader without a type to check against can only
 # ask whether a head is any of them — and those two readings must not drift.
-LIST: Final[Symbol] = Symbol("list")
 PRODUCT: Final[Symbol] = Symbol("prod#")
 ABSTRACTION: Final[Symbol] = Symbol("lambda")
 
-CONSTRUCTORS: Final[frozenset[Symbol]] = frozenset({LIST, PRODUCT, ABSTRACTION})
+# The two constructors of `@bool`, each carrying the nullary product. They are
+# ordinary sum constructors and are read as such: `is_constructor` resolves a
+# head against the keys of the sum, which is what makes these a closed set
+# rather than "any symbol ascribed `@bool`".
+TRUE: Final[Symbol] = Symbol("#t")
+FALSE: Final[Symbol] = Symbol("#f")
+
+# What `@bool` denotes. The spelling is the built-in — the parse phase reads
+# `@bool` by spelling and re-emits it unresolved, as it reads a core form's
+# identifier, so no program can shadow or rebind it — and this is the type that
+# spelling means. `@bool` is not a sort of its own, and no query recognises this
+# value: every reading of a boolean goes through the `SumType` arms, so a
+# hand-written `(@sum (#t (@prod)) (#f (@prod)))` *is* `@bool` and not merely
+# equivalent to it.
+#
+# Named here rather than built at each use, so `elaborate_type` and
+# `Analysis.GROUNDS` cannot drift apart.
+BOOL: Final[SumType] = SumType({TRUE: ProdType(), FALSE: ProdType()})
+
+# The two constructors of `(@list t)`, and the fields a cons cell's payload is
+# written with. A record and not a tuple, so the two operands of a
+# `(cons x xs)` pattern are named where the type is written.
+NIL: Final[Symbol] = Symbol("nil")
+CONS: Final[Symbol] = Symbol("cons")
+ELEMENT: Final[Symbol] = Symbol("x")
+REST: Final[Symbol] = Symbol("xs")
+
+# The variable the recursion is written over. `Symbol("")` is the one symbol no
+# source text can produce — no reader production yields an empty identifier,
+# and `Symbol.__post_init__` holds its scope set empty — so no `@mu` or
+# `forall#` a program writes can bind it.
+#
+# That is what makes `list_of` safe. `substitute` renames nothing, and the
+# element type is routinely written over a variable a program chose: the
+# builtin schemes write `(@list a)`, and were the binder below named `a` too,
+# instantiating one of them would replace the element and leave the recursion
+# pointing at `@int`. An unbindable binder cannot capture anything.
+#
+# `Patterns.ANY` is this symbol used for the same reason one level up.
+SELF: Final[Symbol] = Symbol.toplevel()
+
+
+def list_of(element: Type) -> MuType:
+    # What `(@list t)` denotes. The written form is the built-in — the parse
+    # phase reads `@list` by identifier and re-emits it unresolved, as it reads
+    # a core form's identifier, so no program can shadow or rebind it — and
+    # this is the type it means. `(@list t)` is not a sort of its own: every
+    # one of the five type queries reads a list through the `MuType` and
+    # `SumType` arms, and none of them compares against this.
+    #
+    # One reader does recognise the result, and has to: `TypeChecker.quotation`
+    # reads an `SList` datum against the sum, because `SList` is the runtime
+    # representation of list data and nothing else says which type that
+    # representation inhabits. `Analysis.GROUNDS` names `BOOL` for the same
+    # reason.
+    #
+    # A function rather than a constant, as `BOOL` is a constant, because this
+    # one carries a type argument. Named here rather than built at each use, so
+    # `elaborate_type` and that quoted-datum judgment cannot drift apart.
+    return MuType(
+        SELF,
+        SumType(
+            {
+                CONS: ProdType({ELEMENT: element, REST: VarType(SELF)}),
+                NIL: ProdType(),
+            }
+        ),
+    )
+
+
+CONSTRUCTORS: Final[frozenset[Symbol]] = frozenset({NIL, CONS, PRODUCT, ABSTRACTION})
 
 
 def is_constructor(ty: Type, expr: Expr, context: Context, table: BindingTable) -> bool:
@@ -205,14 +269,6 @@ def is_constructor(ty: Type, expr: Expr, context: Context, table: BindingTable) 
             return isinstance(expr, Integer)
         case CharType():
             return isinstance(expr, Char)
-        case BoolType():
-            match expr:
-                case Symbol() as symbol:
-                    binder: Symbol = meaning(symbol, table)
-
-                    return binder in context and context[binder] == BoolType()
-                case _:
-                    return False
         case VarType(binder=binder) if binder in context.rigid:
             # No expression is a constructor occurrence of an abstract type,
             # which is what makes the body of a polymorphic function checkable:
@@ -223,12 +279,6 @@ def is_constructor(ty: Type, expr: Expr, context: Context, table: BindingTable) 
         case VarType(binder=binder):
             # A type variable is constructed however the type bound to it is.
             return is_constructor(context.variable(binder), expr, context, table)
-        case ListType():
-            match expr:
-                case Symbol() as symbol:
-                    return meaning(symbol, table) == LIST
-                case _:
-                    return False
         case SumType(cons=cons):
             # `cons` is keyed by binders, so a reference names a constructor
             # exactly when it resolves to one of the keys.
@@ -266,6 +316,56 @@ def is_constructor(ty: Type, expr: Expr, context: Context, table: BindingTable) 
             raise ValueError(f"not a type: {ty}")
 
 
+def constructors(ty: Type, context: Context) -> dict[Symbol, Type] | None:
+    # Every way a term of `ty` is built, as ⟨constructor, payload type⟩, or
+    # `None` where the sort has no closed set of them. This is what makes a
+    # `match` exhaustive: a sort answering a mapping can be covered by naming
+    # each key, and one answering `None` can only be covered by a pattern that
+    # matches everything.
+    #
+    # The fifth query over a type, and the one that reads a sort as a sum. The
+    # other four answer about one constructor at a time — whether a head is one
+    # of them, how many arguments it takes — and none of them can enumerate.
+    #
+    # `None` is not "no constructors". `@int` and `@char` have one per value,
+    # which is why they cannot be enumerated; a `@fun` is built by `lambda` but
+    # nothing takes a procedure apart, so a `match` over one has nothing to
+    # read; and the variadic types classify no values at all. All four are the
+    # same answer to the one question asked here.
+    match ty:
+        case SumType(cons=cons):
+            # The one sort that already is a mapping. Copied, so a caller
+            # cannot reach into the type through it.
+            return dict(cons)
+        case ProdType() as product:
+            # One constructor, so a pattern over a product refutes nothing: it
+            # names the fields and always matches.
+            return {PRODUCT: product}
+        case IntType() | CharType():
+            return None
+        case FunType() | VariadicType() | VariadicStarType():
+            return None
+        case VarType(binder=binder) if binder in context.rigid:
+            # An abstract variable stands for any type at all, so no set of
+            # constructors is the one its instance has. Answered rather than
+            # raised, as `is_nullary_type` answers: this is a question a
+            # `match` in a polymorphic body legitimately asks, and the answer
+            # is that it may only match everything.
+            return None
+        case VarType(binder=binder):
+            return constructors(context.variable(binder), context)
+        case MuType() as recursive:
+            # Taken apart as its unfolding and not under a binding, unlike
+            # `constructor_arity` and `is_constructor`: those read the body
+            # without rebuilding it, while the payload types here cross back to
+            # the caller and a `VarType` among them would arrive somewhere the
+            # binding does not reach. The unfolding leaves every recursive
+            # position folded, so a payload is a type the program wrote.
+            return constructors(unfold(recursive), context)
+        case _:
+            raise ValueError(f"not a type: {ty}")
+
+
 def is_nullary_type(ty: Type, context: Context) -> bool:
     # Whether `ty` is a ground type: one written as a bare symbol, classifying
     # values that have a representation of their own. Read by resolution and
@@ -273,7 +373,7 @@ def is_nullary_type(ty: Type, context: Context) -> bool:
     # ground type is one: a variable bound to `@int` stands for `@int` however
     # it is spelled.
     match ty:
-        case IntType() | CharType() | BoolType():
+        case IntType() | CharType():
             return True
         case VarType(binder=binder) if binder in context.rigid:
             # An abstract variable is written as a bare name, but it is not a
@@ -288,8 +388,7 @@ def is_nullary_type(ty: Type, context: Context) -> bool:
             # letting it read as a type it is not.
             return is_nullary_type(context.variable(binder), context)
         case (
-            ListType()
-            | SumType()
+            SumType()
             | ProdType()
             | VariadicType()
             | VariadicStarType()
@@ -340,12 +439,10 @@ def substitute(ty: Type, variable: Symbol, replacement: Type) -> Type:
     # only caller, and the type it substitutes is the one being taken apart,
     # which has no free variable to capture.
     match ty:
-        case IntType() | CharType() | BoolType():
+        case IntType() | CharType():
             return ty
         case VarType(binder=binder):
             return replacement if binder == variable else ty
-        case ListType(element=element):
-            return ListType(substitute(element, variable, replacement))
         case SumType() as total:
             return SumType(
                 {
@@ -428,16 +525,10 @@ def solve(
             else:
                 solution[binder] = target
                 return True
-        case IntType() | CharType() | BoolType() | VarType():
+        case IntType() | CharType() | VarType():
             # A ground type, or a variable this scheme does not quantify: there
             # is nothing to solve, so matching is equality.
             return pattern == target
-        case ListType(element=element):
-            match target:
-                case ListType(element=other):
-                    return solve(element, other, variables, solution)
-                case _:
-                    return False
         case VariadicType(argument=argument):
             match target:
                 case VariadicType(argument=other):
@@ -628,24 +719,38 @@ class Context:
         # them all: no two of these is ever read under the other.
         a: Symbol = Symbol("a")
         element: VarType = VarType(a)
-        listed: ListType = ListType(element)
+        listed: MuType = list_of(element)
 
         return cls(
             {
-                Symbol("#t"): BoolType(),
-                Symbol("#f"): BoolType(),
+                # `#t` and `#f` are absent, and deliberately: an ascription
+                # here is what would let a bare `#t` check through `check`'s
+                # reference arm, and a boolean is written as the sum
+                # constructor applied to its payload — `(#t (prod#))`.
+                #
+                # `prod#` stays. It is not what checks a `(prod# ...)`, which
+                # `is_constructor` reads by resolution, but it is what lets
+                # `type_of` read `(prod#)`'s type — and that payload is read
+                # nowhere else.
                 Symbol("prod#"): FunType(return_type=ProdType()),
                 Symbol("+"): FunType(return_type=IntType(), argument_type=binop),
                 Symbol("-"): FunType(return_type=IntType(), argument_type=binop),
                 Symbol("*"): FunType(return_type=IntType(), argument_type=binop),
                 Symbol("mod"): FunType(return_type=IntType(), argument_type=binop),
-                Symbol("lt"): FunType(return_type=BoolType(), argument_type=binop),
-                Symbol("le"): FunType(return_type=BoolType(), argument_type=binop),
+                Symbol("lt"): FunType(return_type=BOOL, argument_type=binop),
+                Symbol("le"): FunType(return_type=BOOL, argument_type=binop),
             },
             schemes={
-                # The selectors and the constructor. Each writes its variable
-                # into its result, so the checked type names the instance on its
-                # own and no operand has to be synthesized for them.
+                # The selectors. Each writes its variable into its result, so
+                # the checked type names the instance on its own and no operand
+                # has to be synthesized for them.
+                #
+                # `.` is absent, and deliberately: it was the cell constructor
+                # standing in for one `(@list t)` had no name for, and the sum
+                # names it `cons`. A list is built as its constructors applied
+                # to their payloads — `(nil (prod#))` and
+                # `(cons (prod# x xs))` — which `is_constructor` reads by
+                # resolution, so no ascription here would be what checks one.
                 Symbol("head"): Scheme(
                     variables=(a,),
                     body=FunType(
@@ -660,13 +765,6 @@ class Context:
                         argument_type=ProdType([listed]),
                     ),
                 ),
-                Symbol("."): Scheme(
-                    variables=(a,),
-                    body=FunType(
-                        return_type=listed,
-                        argument_type=ProdType([element, listed]),
-                    ),
-                ),
                 # The two that write their variable only among their arguments,
                 # and so are instantiated from an operand rather than from the
                 # checked type. `solve` already anticipates one of them: it is
@@ -674,7 +772,7 @@ class Context:
                 Symbol("eq"): Scheme(
                     variables=(a,),
                     body=FunType(
-                        return_type=BoolType(),
+                        return_type=BOOL,
                         argument_type=ProdType([element, element]),
                     ),
                 ),

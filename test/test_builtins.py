@@ -2,7 +2,16 @@ import pytest
 
 from Evaluate import BUILTINS, Environment, EvalError, Value, evaluate
 from Reader import read
-from Syntax import Boolean, Integer, SList, Symbol
+from Syntax import (
+    Integer,
+    SList,
+    Symbol,
+    as_syntax,
+    boolean,
+    listed,
+    product,
+    unit,
+)
 
 
 def run(source: str) -> Value:
@@ -14,34 +23,51 @@ def test_head_returns_the_first_element():
 
 
 def test_tail_returns_the_rest_of_the_list():
-    assert run("(tail '(a b))") == SList([Symbol("b")])
+    assert run("(tail '(a b))") == listed([Symbol("b")])
 
 
 def test_tail_of_a_singleton_is_the_empty_list():
-    assert run("(tail '(a))") == SList([])
+    assert run("(tail '(a))") == listed([])
 
 
-def test_dot_conses_onto_the_head():
-    assert run("(. 1 '(2 3))") == SList([Integer(1), Integer(2), Integer(3)])
+def test_a_product_is_one_sort_at_every_width():
+    # The nullary product is the empty tuple and not a sort of its own, which
+    # is what `(#t (prod#))` carries and a `(prod#)` pattern matches.
+    assert run("(prod#)") == unit()
+    assert run("(prod#)") == product([])
+    assert run("(prod# 1 2)") == product([Integer(1), Integer(2)])
+    assert run("(prod# 1)") == product([Integer(1)])
 
 
-def test_dot_onto_the_empty_list_makes_a_singleton():
-    assert run("(. 1 '())") == SList([Integer(1)])
+def test_nil_is_the_empty_list():
+    assert run("(nil (prod#))") == listed([])
 
 
-def test_head_undoes_dot():
-    assert run("(head (. 1 '(2)))") == Integer(1)
+def test_cons_conses_onto_the_head():
+    assert run("(cons (prod# 1 '(2 3)))") == listed(
+        [Integer(1), Integer(2), Integer(3)]
+    )
 
 
-def test_dot_leaves_its_argument_intact():
-    source = "(letrec ((xs '(2))) ((lambda (ys) xs) (. 1 xs)))"
-    assert run(source) == SList([Integer(2)])
+def test_cons_onto_the_empty_list_makes_a_singleton():
+    assert run("(cons (prod# 1 (nil (prod#))))") == listed([Integer(1)])
 
 
-def test_quote_returns_the_datum_verbatim():
+def test_head_undoes_cons():
+    assert run("(head (cons (prod# 1 '(2))))") == Integer(1)
+
+
+def test_cons_leaves_its_argument_intact():
+    source = "(letrec ((xs '(2))) ((lambda (ys) xs) (cons (prod# 1 xs))))"
+    assert run(source) == listed([Integer(2)])
+
+
+def test_quote_reads_a_datum_as_the_value_it_denotes():
+    # An atom is already the value it denotes; a list is read as the `cons`
+    # nest that is one, because no value is an `SList`.
     assert run("'x") == Symbol("x")
-    assert run("'()") == SList([])
-    assert run("''x") == SList([Symbol("quote"), Symbol("x")])
+    assert run("'()") == listed([])
+    assert run("''x") == listed([Symbol("quote"), Symbol("x")])
 
 
 def test_a_lambda_binder_shadows_a_builtin():
@@ -49,16 +75,14 @@ def test_a_lambda_binder_shadows_a_builtin():
 
 
 def test_le_is_less_than_or_equal():
-    assert run("(le 1 2)") == Boolean(True)
-    assert run("(le 2 2)") == Boolean(True)
-    assert run("(le 3 2)") == Boolean(False)
+    assert run("(le 1 2)") == boolean(True)
+    assert run("(le 2 2)") == boolean(True)
+    assert run("(le 3 2)") == boolean(False)
 
 
 def test_gt_lt_ge_order_integers():
-    assert run("(gt 2 1)") == Boolean(True)
-    assert run("(gt 1 1)") == Boolean(False)
-    assert run("(lt 1 2)") == Boolean(True)
-    assert run("(lt 2 2)") == Boolean(False)
+    assert run("(lt 1 2)") == boolean(True)
+    assert run("(lt 2 2)") == boolean(False)
 
 
 def test_arithmetic_operates_on_integers():
@@ -73,36 +97,23 @@ def test_mod_takes_the_divisors_sign():
     assert run("(mod 7 (- 0 2))") == Integer(-1)
 
 
-def test_the_motivating_recursion_returns_the_singleton():
-    source = (
-        "(letrec ((go (lambda (xs)"
-        " (letrec ((n (len xs)))"
-        "  (if (gt n 0)"
-        "   (letrec ((x (head xs)))"
-        "    (if (eq (mod (* n x) 2) 0) (go (. x xs)) xs))"
-        "   (go (. 1 xs)))))))"
-        " (go '()))"
-    )
-    assert run(source) == SList([Integer(1)])
-
-
 def test_eq_compares_integers():
-    assert run("(eq 1 1)") == Boolean(True)
-    assert run("(eq 1 2)") == Boolean(False)
+    assert run("(eq 1 1)") == boolean(True)
+    assert run("(eq 1 2)") == boolean(False)
 
 
 def test_eq_compares_symbols_by_name():
-    assert run("(eq 'a 'a)") == Boolean(True)
-    assert run("(eq 'a 'b)") == Boolean(False)
+    assert run("(eq 'a 'a)") == boolean(True)
+    assert run("(eq 'a 'b)") == boolean(False)
 
 
 def test_eq_compares_lists_structurally():
-    assert run("(eq '(1 2) '(1 2))") == Boolean(True)
-    assert run("(eq '() '())") == Boolean(True)
+    assert run("(eq '(1 2) '(1 2))") == boolean(True)
+    assert run("(eq '() '())") == boolean(True)
 
 
 def test_eq_across_types_is_false():
-    assert run("(eq 1 'a)") == Boolean(False)
+    assert run("(eq 1 'a)") == boolean(False)
 
 
 def test_len_counts_top_level_items():
@@ -111,15 +122,20 @@ def test_len_counts_top_level_items():
     assert run("(len '((a b) c))") == Integer(2)
 
 
-def test_predicates_drive_if():
-    assert run("(if (le (head '(1 2)) (len '(a b))) 'yes 'no)") == Symbol("yes")
+def test_predicates_drive_a_match():
+    source = "(match (le (head '(1 2)) (len '(a b))) ((#t) 'yes) ((#f) 'no))"
+
+    assert run(source) == Symbol("yes")
 
 
 def test_expand_scopes_quoted_syntax():
     # The builtin draws scopes from the global counter, so the expectation
     # is structural: the binder and its occurrence acquire the same fresh
     # scopes, and the keyword stays in the empty top-level region.
-    result = run("(expand '(lambda (x) x))")
+    #
+    # Read back through `as_syntax`, because the builtin answers with the list
+    # data denoting the program and `expand` is written over syntax.
+    result = as_syntax(run("(expand '(lambda (x) x))"))
 
     match result:
         case SList([Symbol() as head, SList([Symbol() as binder]), Symbol() as body]):
@@ -132,7 +148,7 @@ def test_expand_scopes_quoted_syntax():
 
 
 def test_parse_resolves_expanded_syntax():
-    result = run("(parse (expand '((lambda (x) x) 5)))")
+    result = as_syntax(run("(parse (expand '((lambda (x) x) 5)))"))
 
     match result:
         case SList(
@@ -157,11 +173,13 @@ def test_expand_and_parse_compose_over_macros():
     # Hygiene reaches the language level: the macro-introduced binder is
     # spelled like the user's, and the substituted reference still comes out
     # as the user's binder symbol in the parsed result.
-    result = run(
-        "(parse (expand"
-        " '(lambda (x)"
-        "   (letrec-syntax ((m (syntax-rules () ((_ e) (lambda (x) e)))))"
-        "    (m x)))))"
+    result = as_syntax(
+        run(
+            "(parse (expand"
+            " '(lambda (x)"
+            "   (letrec-syntax ((m (syntax-rules () ((_ e) (lambda (x) e)))))"
+            "    (m x)))))"
+        )
     )
 
     match result:
@@ -179,7 +197,7 @@ def test_expand_and_parse_compose_over_macros():
 
 
 def test_parse_strips_quoted_data():
-    result = run("(parse (expand '(lambda (x) 'x)))")
+    result = as_syntax(run("(parse (expand '(lambda (x) 'x)))"))
 
     match result:
         case SList([_, _, SList([Symbol() as head, Symbol() as datum])]):
@@ -190,15 +208,16 @@ def test_parse_strips_quoted_data():
 
 
 def test_parse_output_is_syntax_to_the_other_builtins():
-    # The parsed tree is the same S-expression sort as any other datum, so
-    # the list builtins consume it directly.
+    # The parsed tree is list data like any other, so the list builtins consume
+    # it directly — which is what the conversion at the builtin's boundary is
+    # for.
     assert run("(head (parse (expand '(f x))))") == Symbol("f")
 
 
 def test_parse_reads_an_ascribed_programs_type():
     # An ascription survives into the parsed tree with its type read as a type:
     # resolved where it binds, and emitted bare where it names a constructor.
-    result = run("(parse (expand '(lambda ((ascribe# x @int)) x)))")
+    result = as_syntax(run("(parse (expand '(lambda ((ascribe# x @int)) x)))"))
 
     match result:
         case SList([_, SList([SList([keyword, _, ty])]), _]):
@@ -222,21 +241,23 @@ def test_parse_refuses_an_ascribed_program_whose_type_is_malformed():
         "(tail '())",
         "(head 5)",
         "(tail 5)",
-        "(. 1 2)",
-        "(. (lambda (x) x) '())",
+        "(cons (prod# 1 2))",
+        "(cons (prod# (lambda (x) x) '()))",
+        "(cons 1)",
+        "(cons (prod# 1))",
+        "(nil 1)",
+        "(nil (prod# 1 2))",
+        "(prod# (lambda (x) x))",
         "(head '(a) '(b))",
         "(tail)",
-        "(. 1)",
         "(le 1 'a)",
         '(le "x" 2)',
-        "(gt 1 'a)",
         "(lt 'a 1)",
         "(+ 1 'a)",
         "(- 'a 1)",
         "(* 1 '())",
         "(mod 1 'a)",
         "(mod 7 0)",
-        "(gt 1)",
         "(+ 1 2 3)",
         "(eq head 1)",
         "(eq 1 (lambda (x) x))",

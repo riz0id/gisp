@@ -2,23 +2,28 @@ from Evaluate.Builtins import BUILTINS
 from Evaluate.Environment import Environment
 from Evaluate.Error import EvalError, UnboundSymbol
 from Syntax import (
-    Boolean,
     Char,
     Closure,
     Expr,
     Integer,
-    Nil,
     Primitive,
+    ProductConExpr,
+    Residual,
     SList,
+    SumConExpr,
     Symbol,
     Value,
+    as_data,
     binder_name,
+    spread,
+    unit,
 )
 
 __all__ = [
     "BUILTINS",
     "Environment",
     "EvalError",
+    "Residual",
     "UnboundSymbol",
     "evaluate",
     "evaluate_toplevel",
@@ -27,19 +32,12 @@ __all__ = [
 
 
 def name(symbol: Symbol) -> str:
-    # The environment is keyed by spelling and the evaluator is scope-blind,
-    # so a symbol's runtime name is its identifier. An anonymous symbol
-    # carries no spelling and has no runtime meaning.
     if not symbol.identifier:
         raise EvalError(f"no unique spelling: {symbol!r}")
     return symbol.identifier
 
 
 def parameter_names(parameters: list[Expr]) -> tuple[str, ...] | None:
-    # The runtime names of a lambda's parameters, or `None` when any parameter
-    # is not a binder position. An ascription is erased here: the type names no
-    # value, and a closure's arity is the count of these names, so folding the
-    # type in would give the closure an extra parameter.
     names: list[str] = []
 
     for parameter in parameters:
@@ -54,10 +52,6 @@ def parameter_names(parameters: list[Expr]) -> tuple[str, ...] | None:
 
 
 def letrec_bindings(bindings: list[Expr]) -> list[tuple[Symbol, Expr]] | None:
-    # The ⟨binder, initializer⟩ of every letrec binding, or `None` when any
-    # binding is not one. The arm guard and its body read the shape once
-    # between them through this, so no binding can pass the guard and then be
-    # silently dropped by a second, stricter match.
     pairs: list[tuple[Symbol, Expr]] = []
 
     for binding in bindings:
@@ -70,13 +64,69 @@ def letrec_bindings(bindings: list[Expr]) -> list[tuple[Symbol, Expr]] | None:
     return pairs
 
 
+def destructure(pattern: Expr, value: Value) -> dict[str, Value] | None:
+    bound: dict[str, Value] = {}
+
+    return bound if matched(pattern, value, bound) else None
+
+
+def matched(pattern: Expr, value: Value, bound: dict[str, Value]) -> bool:
+    named: Symbol | None = binder_name(pattern)
+
+    if named is not None:
+        bound[name(named)] = value
+        return True
+
+    match pattern:
+        case Integer() | Char():
+            return pattern == value
+        case SList([Symbol() as head, *operands]):
+            return constructed(head, operands, value, bound)
+        case _:
+            raise EvalError(f"cannot match: {pattern!r}")
+
+
+def constructed(
+    head: Symbol, operands: list[Expr], value: Value, bound: dict[str, Value]
+) -> bool:
+    match value:
+        case ProductConExpr() as fields if head.identifier == "prod#":
+            # A product names its own fields, so the operands are read against
+            # them directly; every other constructor carries a payload, and
+            # `spread` is what reads through it.
+            matching: list[Expr] = list(fields.values())
+        case SumConExpr(constructor=con, payload=payload):
+            if con.identifier != head.identifier:
+                return False
+
+            matching = spread(payload)
+        case _:
+            raise EvalError(f"cannot match ({head} ...) against {value}")
+
+    if len(matching) != len(operands):
+        raise EvalError(f"cannot match ({head} ...) against {value}")
+
+    return all(
+        matched(operand, field, bound)
+        for operand, field in zip(operands, matching, strict=True)
+    )
+
+
+def unreduced(value: Value) -> Expr:
+    match value:
+        case Residual(form):
+            return form
+        case Closure() | Primitive():
+            raise EvalError(f"no term denotes the procedure {value}")
+        case _:
+            return value
+
+
+def stuck(arguments: list[Value]) -> bool:
+    return any(isinstance(argument, Residual) for argument in arguments)
+
+
 def evaluate_toplevel(form: Expr, environment: Environment) -> Value | None:
-    # A program is a sequence of top-level forms, and this function is where
-    # that sequence lives: define is a declaration against the environment the
-    # drivers thread through it, not an expression, so it produces no value.
-    # A lambda init captures that same mutable environment and the binding
-    # lands before any call can look it up, which is why a defined procedure
-    # is self-recursive with no pre-binding step.
     match form:
         case SList([Symbol() as head, *rest]) if head.identifier == "define":
             match rest:
@@ -91,29 +141,48 @@ def evaluate_toplevel(form: Expr, environment: Environment) -> Value | None:
 
 def evaluate(expr: Expr, environment: Environment) -> Value:
     match expr:
-        case Integer() | Char() | Boolean() | Nil():
+        case Integer() | Char():
             return expr
         case Symbol() as symbol:
             return environment.lookup(name(symbol))
         case SList([]):
             raise EvalError("the empty combination cannot be evaluated")
         case SList([Symbol() as head, datum]) if head.identifier == "quote":
-            # Quotation is the one runtime constructor of symbol and list
-            # data: the datum is the value, verbatim.
-            return datum
-        case SList([Symbol() as head, test, consequent, alternative]) if (
-            head.identifier == "if"
-        ):
-            if evaluate(test, environment) == Boolean(True):
-                return evaluate(consequent, environment)
-            else:
-                return evaluate(alternative, environment)
+            # The one place a datum becomes a value. No value is an `SList`,
+            # so every list within is read here as the `cons` nest that is
+            # one; an atom is already the value it denotes.
+            return as_data(datum)
+        case SList([Symbol() as head, _]) if head.identifier == "forall":
+            return Residual(expr)
+        case SList([Symbol() as head, scrutinee, *clauses]) if (
+            head.identifier == "match"
+        ) and clauses:
+            decided: Value = evaluate(scrutinee, environment)
+
+            if isinstance(decided, Residual):
+                return Residual(SList([head, decided.form, *clauses]))
+
+            for clause in clauses:
+                match clause:
+                    case SList([pattern, body]):
+                        pass
+                    case _:
+                        raise EvalError(f"malformed match clause: {clause}")
+
+                bound: dict[str, Value] | None = destructure(pattern, decided)
+
+                if bound is not None:
+                    return evaluate(
+                        body, Environment(bindings=bound, parent=environment)
+                    )
+
+            raise EvalError(f"no clause matches: {decided}")
         case SList([Symbol() as head, SList(bindings), body]) if (
             head.identifier == "letrec"
         ) and (pairs := letrec_bindings(bindings)) is not None:
             frame = Environment(bindings={}, parent=environment)
             for bound, _ in pairs:
-                frame.define(name(bound), Nil())
+                frame.define(name(bound), unit())
             for bound, init in pairs:
                 frame.assign(name(bound), evaluate(init, frame))
             return evaluate(body, frame)
@@ -122,9 +191,6 @@ def evaluate(expr: Expr, environment: Environment) -> Value:
         ) and (names := parameter_names(parameters)) is not None:
             return Closure(names, body, environment)
         case SList([Symbol() as head, *_]) if head.identifier == "define":
-            # Only the top-level dispatch above gives define a meaning; here
-            # the form would otherwise fall into the application arm and die
-            # as an unbound symbol, hiding what actually went wrong.
             raise EvalError("define: only allowed at the top level")
         case SList(items):
             return apply_procedure(
@@ -137,6 +203,8 @@ def evaluate(expr: Expr, environment: Environment) -> Value:
 
 def apply_procedure(operator: Value, arguments: list[Value]) -> Value:
     match operator:
+        case Residual(form):
+            return Residual(SList([form, *map(unreduced, arguments)]))
         case Closure(parameters, body, environment):
             if len(parameters) != len(arguments):
                 raise EvalError(
@@ -149,9 +217,11 @@ def apply_procedure(operator: Value, arguments: list[Value]) -> Value:
                 )
 
                 return evaluate(body, frame)
-        case Primitive(arity=arity, operate=operate):
-            if len(arguments) != arity:
+        case Primitive(name=primitive, arity=arity, operate=operate):
+            if arity is not None and len(arguments) != arity:
                 raise EvalError(f"expected {arity} arguments, got {len(arguments)}")
+            elif stuck(arguments):
+                return Residual(SList([Symbol(primitive), *map(unreduced, arguments)]))
             else:
                 return operate(arguments)
         case _:

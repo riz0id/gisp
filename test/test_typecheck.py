@@ -10,17 +10,19 @@ from Reader import read
 from Resolve import BindingTable, bindings
 from Syntax import Expr, Integer, Scope, Symbol
 from Syntax.Type import (
-    BoolType,
+    BOOL,
     CharType,
     Context,
     FunType,
     IntType,
-    ListType,
+    MuType,
     ProdType,
     SumType,
     Type,
     VariadicStarType,
     VariadicType,
+    VarType,
+    list_of,
 )
 from TypeCheck import TypeChecker, TypeCheckError
 
@@ -66,17 +68,51 @@ def test_char_literals_check_at_char():
 
 def test_literals_refuse_foreign_types():
     program, table = program_of("5", 1402)
-    for ty in [CharType(), BoolType(), ListType(IntType())]:
+    for ty in [CharType(), BOOL, list_of(IntType())]:
         with pytest.raises(TypeCheckError):
             TypeChecker(table=table).check(program, ty)
 
 
-def test_the_boolean_symbols_check_at_bool():
-    for source in ["#t", "#f"]:
+def test_the_boolean_constructors_check_at_bool():
+    # `@bool` is a sum, so a boolean is written the way every sum's values are:
+    # the constructor applied to its payload, which here is the nullary
+    # product.
+    for source in ["(#t (prod#))", "(#f (prod#))"]:
         program, table = program_of(source, 1403)
-        TypeChecker(table=table).check(program, BoolType())
+        TypeChecker(table=table).check(program, BOOL)
         with pytest.raises(TypeCheckError):
             TypeChecker(table=table).check(program, IntType())
+
+
+def test_a_bare_boolean_symbol_is_not_an_expression():
+    # The special case that is gone: nothing ascribes `#t`, so it is an
+    # unascribed reference like any other. `(#t)` is refused too, for its
+    # arity — a sum constructor takes its payload.
+    for source in ["#t", "#f", "(#t)", "(#f)"]:
+        program, table = program_of(source, 1404)
+
+        with pytest.raises(TypeCheckError):
+            TypeChecker(table=table).check(program, BOOL)
+
+
+def test_the_sum_written_out_accepts_the_boolean_constructors():
+    # `@bool` written as the sum it is accepts exactly the same terms, which is
+    # what it means for the two to be one type rather than two.
+    program, table = program_of("(#t (prod#))", 1405)
+    written = SumType({Symbol("#t"): ProdType(), Symbol("#f"): ProdType()})
+
+    assert written == BOOL
+    TypeChecker(table=table).check(program, written)
+
+
+def test_only_the_boolean_constructors_construct_bool():
+    # `is_constructor` reads a boolean head by resolving it against the sum's
+    # keys, so a binder of `@bool` type is an ordinary reference in head
+    # position and not a constructor of it.
+    program, table = program_of("(lambda ((ascribe# b @bool)) (b 1))", 1406)
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table).check(program, unary(IntType(), BOOL))
 
 
 # -- variables -------------------------------------------------------------------
@@ -92,7 +128,7 @@ def test_a_reference_off_its_ascription_is_refused():
     program, table = program_of("(lambda (x) x)", 1406)
 
     with pytest.raises(TypeCheckError):
-        TypeChecker(table=table).check(program, unary(BoolType(), IntType()))
+        TypeChecker(table=table).check(program, unary(BOOL, IntType()))
 
 
 def test_an_unascribed_reference_is_refused():
@@ -127,27 +163,229 @@ def test_a_lambda_does_not_inhabit_a_ground_type():
         TypeChecker(table=table).check(program, IntType())
 
 
-# -- if --------------------------------------------------------------------------
+# -- match -----------------------------------------------------------------------
 
 
-def test_if_constrains_the_test_and_both_branches():
-    program, table = program_of("(lambda (x) (if #t x 5))", 1415)
+def test_a_match_constrains_the_scrutinee_and_every_clause_body():
+    program, table = program_of("(lambda (x) (match (le x 1) ((#t) x) ((#f) 5)))", 1415)
 
     TypeChecker(table=table).check(program, unary(IntType(), IntType()))
 
 
-def test_a_non_boolean_test_is_refused():
-    program, table = program_of("(lambda (x) (if 1 x x))", 1416)
+def test_a_non_boolean_scrutinee_is_refused():
+    # `(#t)` is not a constructor of `@int`, which is what refuses this: the
+    # scrutinee's own type is what a pattern is read against.
+    program, table = program_of("(lambda (x) (match 1 ((#t) x) ((#f) x)))", 1416)
 
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).check(program, unary(IntType(), IntType()))
 
 
-def test_a_branch_off_the_checked_type_is_refused():
-    program, table = program_of("(lambda (x) (if #t x #f))", 1417)
+def test_a_clause_body_off_the_checked_type_is_refused():
+    program, table = program_of(
+        "(lambda (x) (match (le x 1) ((#t) x) ((#f) (#f (prod#)))))", 1417
+    )
 
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).check(program, unary(IntType(), IntType()))
+
+
+def test_an_ill_typed_scrutinee_is_refused():
+    # `type_of` answers an application's return type without looking at its
+    # operands, so a scrutinee has to be checked at what was read as well as
+    # read — or `(le #t #t)` would pass for the `@bool` it claims to be.
+    program, table = program_of(
+        "(lambda (x) (match (le (#t (prod#)) (#t (prod#))) ((#t) x) ((#f) x)))", 1418
+    )
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table).check(program, unary(IntType(), IntType()))
+
+
+def test_a_list_match_covers_both_constructors():
+    program, table = program_of("(match xs ((nil) 0) ((cons y ys) 1))", 1420)
+    store = Context.default()
+    store.register(Symbol("xs"), list_of(IntType()))
+
+    TypeChecker(table=table, store=store).check(program, IntType())
+
+
+def test_a_list_match_missing_a_constructor_is_refused():
+    program, table = program_of("(match xs ((nil) 0))", 1421)
+    store = Context.default()
+    store.register(Symbol("xs"), list_of(IntType()))
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table, store=store).check(program, IntType())
+
+
+def test_a_nested_pattern_does_not_cover_its_constructor_on_its_own():
+    # Naming both constructors is not coverage: this one misses every list of
+    # two or more, so exhaustiveness is a question about a constructor's fields
+    # and not about the set of names a clause mentions.
+    program, table = program_of("(match xs ((nil) 0) ((cons y (nil)) 1))", 1422)
+    store = Context.default()
+    store.register(Symbol("xs"), list_of(IntType()))
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table, store=store).check(program, IntType())
+
+    # Adding the clause that does cover it makes the same three-way shape the
+    # libraries are written in.
+    program, table = program_of(
+        "(match xs ((nil) 0) ((cons y (nil)) 1) ((cons y ys) 2))", 1423
+    )
+    store = Context.default()
+    store.register(Symbol("xs"), list_of(IntType()))
+
+    TypeChecker(table=table, store=store).check(program, IntType())
+
+
+def test_a_pattern_binds_its_operands_at_the_payload_types():
+    # `y` is the element and `ys` the rest, which is the whole of what the cons
+    # payload says — and the body is what proves the checker registered them.
+    program, table = program_of("(match xs ((nil) xs) ((cons y ys) ys))", 1424)
+    store = Context.default()
+    store.register(Symbol("xs"), list_of(IntType()))
+
+    TypeChecker(table=table, store=store).check(program, list_of(IntType()))
+
+    # The element is an `@int`, so a clause returning it at a list type is not.
+    program, table = program_of("(match xs ((nil) xs) ((cons y ys) y))", 1425)
+    store = Context.default()
+    store.register(Symbol("xs"), list_of(IntType()))
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table, store=store).check(program, list_of(IntType()))
+
+
+def test_a_pattern_operand_count_off_the_payload_is_refused():
+    program, table = program_of("(match xs ((nil) 0) ((cons y) 1))", 1426)
+    store = Context.default()
+    store.register(Symbol("xs"), list_of(IntType()))
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table, store=store).check(program, IntType())
+
+
+def test_an_integer_match_is_exhaustive_only_with_an_irrefutable_clause():
+    store = Context.default()
+    store.register(Symbol("n"), IntType())
+
+    program, table = program_of("(match n (0 1) (m m))", 1427)
+    TypeChecker(table=table, store=store).check(program, IntType())
+
+    # A literal covers one value of `@int`, and `@int` has a constructor per
+    # value — so no run of literals is ever exhaustive.
+    program, table = program_of("(match n (0 1))", 1428)
+    store = Context.default()
+    store.register(Symbol("n"), IntType())
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table, store=store).check(program, IntType())
+
+
+def test_a_procedure_cannot_be_matched_on():
+    # Nothing takes a closure apart: `lambda` builds one, `eq` raises on one,
+    # and a pattern over one would have no field to name.
+    program, table = program_of("(match f ((lambda) 1) (g 2))", 1429)
+    store = Context.default()
+    store.register(Symbol("f"), unary(IntType(), IntType()))
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table, store=store).check(program, IntType())
+
+
+def test_a_sum_is_taken_apart_by_its_constructors():
+    # The eliminator sums never had. `check` could already build one, and this
+    # is the first thing that reads one back.
+    program, table = program_of("(match s ((zero) 0) ((succ n) n))", 1430)
+    store = Context.default()
+    store.register(
+        Symbol("s"),
+        SumType({Symbol("zero"): ProdType(), Symbol("succ"): IntType()}),
+    )
+
+    TypeChecker(table=table, store=store).check(program, IntType())
+
+
+def test_a_sum_match_missing_a_constructor_is_refused():
+    program, table = program_of("(match s ((succ n) n))", 1431)
+    store = Context.default()
+    store.register(
+        Symbol("s"),
+        SumType({Symbol("zero"): ProdType(), Symbol("succ"): IntType()}),
+    )
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table, store=store).check(program, IntType())
+
+
+def test_a_product_match_is_irrefutable_and_names_the_fields():
+    # One constructor, so a product pattern refutes nothing — and it is the
+    # only way to project a field, since the language has no selectors.
+    program, table = program_of("(match p ((prod# a b) a))", 1432)
+    store = Context.default()
+    store.register(
+        Symbol("p"),
+        ProdType({Symbol("x"): IntType(), Symbol("y"): BOOL}),
+    )
+
+    TypeChecker(table=table, store=store).check(program, IntType())
+
+    program, table = program_of("(match p ((prod# a b) b))", 1433)
+    store = Context.default()
+    store.register(
+        Symbol("p"),
+        ProdType({Symbol("x"): IntType(), Symbol("y"): BOOL}),
+    )
+
+    TypeChecker(table=table, store=store).check(program, BOOL)
+
+
+def test_a_recursive_sum_is_matched_through_its_unfolding():
+    # `(@mu a ...)` is taken apart as its unfolding, so the recursive position
+    # comes back as the folded type and a pattern over it is written at the
+    # type the program wrote.
+    nat = MuType(
+        Symbol("a"),
+        SumType({Symbol("zero"): ProdType(), Symbol("succ"): VarType(Symbol("a"))}),
+    )
+    program, table = program_of("(match s ((zero) s) ((succ m) m))", 1434)
+    store = Context.default()
+    store.register(Symbol("s"), nat)
+
+    TypeChecker(table=table, store=store).check(program, nat)
+
+
+def test_a_pattern_binder_takes_an_ascription_checked_against_its_position():
+    program, table = program_of(
+        "(match xs ((nil) 0) ((cons (ascribe# y @int) ys) y))", 1435
+    )
+    store = Context.default()
+    store.register(Symbol("xs"), list_of(IntType()))
+
+    TypeChecker(table=table, store=store).check(program, IntType())
+
+    # Ascribed off its position, which the function type fixes.
+    program, table = program_of(
+        "(match xs ((nil) 0) ((cons (ascribe# y @bool) ys) 0))", 1436
+    )
+    store = Context.default()
+    store.register(Symbol("xs"), list_of(IntType()))
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table, store=store).check(program, IntType())
+
+
+def test_two_clauses_may_bind_the_one_spelling():
+    # Each clause is a region of its own, so the two `y` binders are distinct
+    # symbols and the store holds both.
+    program, table = program_of("(match xs ((cons y ys) y) (y 0))", 1437)
+    store = Context.default()
+    store.register(Symbol("xs"), list_of(IntType()))
+
+    TypeChecker(table=table, store=store).check(program, IntType())
 
 
 # -- letrec ----------------------------------------------------------------------
@@ -171,10 +409,10 @@ def test_an_unascribed_letrec_binder_is_refused():
 def test_an_initializer_off_its_ascription_is_refused():
     program, table = program_of("(letrec ((n 5)) n)", 1422)
     store: Context = Context.default()
-    store.register(var("n", 1422), BoolType())
+    store.register(var("n", 1422), BOOL)
 
     with pytest.raises(TypeCheckError):
-        TypeChecker(table=table, store=store).check(program, BoolType())
+        TypeChecker(table=table, store=store).check(program, BOOL)
 
 
 # -- applications ----------------------------------------------------------------
@@ -189,18 +427,18 @@ def test_builtin_arithmetic_applications_check():
 def test_builtin_comparison_applications_check():
     program, table = program_of("(lambda (x) (lt x 1))", 1426)
 
-    TypeChecker(table=table).check(program, unary(BoolType(), IntType()))
+    TypeChecker(table=table).check(program, unary(BOOL, IntType()))
 
 
 def test_an_application_off_its_return_type_is_refused():
     program, table = program_of("(lambda (x) (+ x 1))", 1427)
 
     with pytest.raises(TypeCheckError):
-        TypeChecker(table=table).check(program, unary(BoolType(), IntType()))
+        TypeChecker(table=table).check(program, unary(BOOL, IntType()))
 
 
 def test_an_operand_off_its_argument_type_is_refused():
-    program, table = program_of("(lambda (x) (+ x #t))", 1428)
+    program, table = program_of("(lambda (x) (+ x (#t (prod#))))", 1428)
 
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).check(program, unary(IntType(), IntType()))
@@ -234,74 +472,101 @@ def test_variadic_applications_admit_any_argument_count():
     store: Context = Context.default()
     store.register(
         Symbol("f"),
-        FunType(return_type=BoolType(), argument_type=VariadicType(IntType())),
+        FunType(return_type=BOOL, argument_type=VariadicType(IntType())),
     )
 
     for source in ["(f)", "(f 1)", "(f 1 2 3)"]:
         program, table = program_of(source, 1435)
-        TypeChecker(table=table, store=store).check(program, BoolType())
+        TypeChecker(table=table, store=store).check(program, BOOL)
 
 
 def test_variadic_operands_share_the_one_type():
     store: Context = Context.default()
     store.register(
         Symbol("f"),
-        FunType(return_type=BoolType(), argument_type=VariadicType(IntType())),
+        FunType(return_type=BOOL, argument_type=VariadicType(IntType())),
     )
-    program, table = program_of("(f 1 #t)", 1436)
+    program, table = program_of("(f 1 (#t (prod#)))", 1436)
 
     with pytest.raises(TypeCheckError):
-        TypeChecker(table=table, store=store).check(program, BoolType())
+        TypeChecker(table=table, store=store).check(program, BOOL)
 
 
 def test_a_variadic_star_run_requires_an_argument():
     store: Context = Context.default()
     store.register(
         Symbol("g"),
-        FunType(return_type=BoolType(), argument_type=VariadicStarType(IntType())),
+        FunType(return_type=BOOL, argument_type=VariadicStarType(IntType())),
     )
 
     program, table = program_of("(g 1)", 1437)
-    TypeChecker(table=table, store=store).check(program, BoolType())
+    TypeChecker(table=table, store=store).check(program, BOOL)
 
     program, table = program_of("(g)", 1438)
     with pytest.raises(TypeCheckError):
-        TypeChecker(table=table, store=store).check(program, BoolType())
+        TypeChecker(table=table, store=store).check(program, BOOL)
 
 
 # -- constructions ----------------------------------------------------------------
 
 
-def test_list_constructions_check_elementwise():
-    program, table = program_of("(list 1 2 3)", 1440)
+def test_a_cell_construction_checks_its_payload_fieldwise():
+    # `(@list t)` is a sum, so a cell is built the way a sum's values are: the
+    # constructor applied to its payload, which here is the two-field record
+    # `(@prod (x t) (xs (@list t)))`.
+    program, table = program_of("(cons (prod# 1 (nil (prod#))))", 1440)
 
-    TypeChecker(table=table).check(program, ListType(IntType()))
+    TypeChecker(table=table).check(program, list_of(IntType()))
 
 
 def test_a_list_element_off_the_element_type_is_refused():
-    program, table = program_of("(list 1 #t)", 1441)
+    program, table = program_of("(cons (prod# (#t (prod#)) (nil (prod#))))", 1441)
 
     with pytest.raises(TypeCheckError):
-        TypeChecker(table=table).check(program, ListType(IntType()))
+        TypeChecker(table=table).check(program, list_of(IntType()))
 
 
 def test_the_empty_list_construction_checks_at_any_element_type():
-    program, table = program_of("(list)", 1442)
+    program, table = program_of("(nil (prod#))", 1442)
 
-    TypeChecker(table=table).check(program, ListType(IntType()))
-    TypeChecker(table=table).check(program, ListType(BoolType()))
+    TypeChecker(table=table).check(program, list_of(IntType()))
+    TypeChecker(table=table).check(program, list_of(BOOL))
+
+
+def test_a_cell_payload_is_not_spread_across_the_operands():
+    # The asymmetry every sum has: a pattern spreads the payload's fields, so
+    # `(cons x xs)` takes a cell apart with two operands, while a construction
+    # applies the constructor to the one payload. `(#t (prod#))` is written for
+    # the same reason.
+    program, table = program_of("(cons 1 (nil (prod#)))", 1443)
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table).check(program, list_of(IntType()))
+
+
+def test_neither_list_nor_dot_constructs_a_list():
+    # Both were removed with the sort. `list` was the one n-ary constructor the
+    # language had, and a sum constructor takes a single payload; `.` stood in
+    # for the cell constructor the sort had no name for, and the sum names it
+    # `cons`. Neither is ascribed or bound, so each is refused as the
+    # unascribed application head it now is.
+    for source, at in [("(list 1 2 3)", 1444), ("(. 1 (nil (prod#)))", 1445)]:
+        program, table = program_of(source, at)
+
+        with pytest.raises(TypeCheckError):
+            TypeChecker(table=table).check(program, list_of(IntType()))
 
 
 def test_product_constructions_check_fieldwise():
-    program, table = program_of("(prod# 1 #t)", 1445)
-    ty = ProdType({Symbol("a"): IntType(), Symbol("b"): BoolType()})
+    program, table = program_of("(prod# 1 (#t (prod#)))", 1445)
+    ty = ProdType({Symbol("a"): IntType(), Symbol("b"): BOOL})
 
     TypeChecker(table=table).check(program, ty)
 
 
 def test_a_field_count_off_the_product_is_refused():
     program, table = program_of("(prod# 1)", 1446)
-    ty = ProdType({Symbol("a"): IntType(), Symbol("b"): BoolType()})
+    ty = ProdType({Symbol("a"): IntType(), Symbol("b"): BOOL})
 
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).check(program, ty)
@@ -313,7 +578,7 @@ def test_sum_constructions_check_their_payload():
 
     TypeChecker(table=table).check(program, ty)
 
-    program, table = program_of("(c #t)", 1451)
+    program, table = program_of("(c (#t (prod#)))", 1451)
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).check(program, ty)
 
@@ -321,10 +586,10 @@ def test_sum_constructions_check_their_payload():
 # -- shadowing --------------------------------------------------------------------
 
 
-def test_a_shadowed_constructor_spelling_is_an_ordinary_application():
-    # The binder spelled `list` captures the body's head, so the application
+def test_a_shadowed_constructor_identifier_is_an_ordinary_application():
+    # The binder named `cons` captures the body's head, so the application
     # reads through the binder's ascription rather than constructing a list.
-    program, table = program_of("(lambda (list) (list 1))", 1455)
+    program, table = program_of("(lambda (cons) (cons 1))", 1455)
     ty = FunType(
         return_type=IntType(),
         argument_type=ProdType({Symbol("f"): unary(IntType(), IntType())}),
@@ -333,10 +598,10 @@ def test_a_shadowed_constructor_spelling_is_an_ordinary_application():
     TypeChecker(table=table).check(program, ty)
 
 
-def test_a_shadowed_list_spelling_does_not_construct_a_list():
-    program, table = program_of("(lambda (list) (list 1))", 1456)
+def test_a_shadowed_cons_identifier_does_not_construct_a_list():
+    program, table = program_of("(lambda (cons) (cons 1))", 1456)
     ty = FunType(
-        return_type=ListType(IntType()),
+        return_type=list_of(IntType()),
         argument_type=ProdType({Symbol("f"): unary(IntType(), IntType())}),
     )
 
@@ -352,15 +617,19 @@ def test_a_shadowed_list_spelling_does_not_construct_a_list():
 
 
 def test_head_checks_its_operand_at_a_list_of_the_checked_type():
-    program, table = program_of("(head (list 1 2))", 1460)
+    program, table = program_of("(head '(1 2))", 1460)
 
     TypeChecker(table=table).check(program, IntType())
 
 
 def test_head_reads_the_element_type_off_the_checked_type():
-    program, table = program_of("(head (list #t))", 1461)
+    # A quoted datum cannot stand in here: no datum is a boolean, so the list
+    # is built from its constructors.
+    program, table = program_of(
+        "(head (cons (prod# (#t (prod#)) (nil (prod#)))))", 1461
+    )
 
-    TypeChecker(table=table).check(program, BoolType())
+    TypeChecker(table=table).check(program, BOOL)
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).check(program, IntType())
 
@@ -373,20 +642,20 @@ def test_head_refuses_an_operand_that_is_not_a_list():
 
 
 def test_tail_checks_at_the_list_type_it_returns():
-    program, table = program_of("(tail (list 1 2))", 1463)
+    program, table = program_of("(tail '(1 2))", 1463)
 
-    TypeChecker(table=table).check(program, ListType(IntType()))
+    TypeChecker(table=table).check(program, list_of(IntType()))
 
 
 def test_tail_does_not_return_an_element():
-    program, table = program_of("(tail (list 1))", 1464)
+    program, table = program_of("(tail '(1))", 1464)
 
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).check(program, IntType())
 
 
 def test_the_selectors_compose():
-    program, table = program_of("(head (tail (list 1 2)))", 1465)
+    program, table = program_of("(head (tail '(1 2)))", 1465)
 
     TypeChecker(table=table).check(program, IntType())
 
@@ -394,21 +663,21 @@ def test_the_selectors_compose():
 def test_a_selector_operand_reads_through_its_ascription():
     program, table = program_of("(lambda (xs) (head xs))", 1466)
 
-    TypeChecker(table=table).check(program, unary(IntType(), ListType(IntType())))
+    TypeChecker(table=table).check(program, unary(IntType(), list_of(IntType())))
 
 
 def test_the_selectors_take_one_argument():
-    program, table = program_of("(head (list 1) (list 2))", 1467)
+    program, table = program_of("(head '(1) '(2))", 1467)
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).check(program, IntType())
 
     program, table = program_of("(tail)", 1468)
     with pytest.raises(TypeCheckError):
-        TypeChecker(table=table).check(program, ListType(IntType()))
+        TypeChecker(table=table).check(program, list_of(IntType()))
 
 
-def test_a_shadowed_selector_spelling_is_an_ordinary_application():
-    # The binder spelled `head` captures the body's head, so the application
+def test_a_shadowed_selector_identifier_is_an_ordinary_application():
+    # The binder named `head` captures the body's head, so the application
     # reads through the binder's ascription rather than selecting from a list.
     # A shadowing binder is a scoped symbol, which is in neither namespace of
     # the store until `abstraction` registers it.
@@ -424,39 +693,53 @@ def test_a_shadowed_selector_spelling_is_an_ordinary_application():
 # -- polymorphism: instantiation from the checked type ----------------------------
 
 
-def test_cons_instantiates_at_several_element_types():
+def test_a_selector_instantiates_at_several_element_types():
+    # `head`'s scheme writes its variable into its return type, so the checked
+    # type is what names the instance — and the new `@mu` is what `solve` has
+    # to read it through.
     for source, element in [
-        ("(. 1 (list 2))", IntType()),
-        ("(. #t (list #f))", BoolType()),
-        (r"(. #\a (list #\b))", CharType()),
+        ("(head '(1 2))", IntType()),
+        ("(head (cons (prod# (#t (prod#)) (nil (prod#)))))", BOOL),
+        (r"(head '(#\a #\b))", CharType()),
+        ("(head '((1) (2)))", list_of(IntType())),
     ]:
         program, table = program_of(source, 1600)
-        TypeChecker(table=table).check(program, ListType(element))
+        TypeChecker(table=table).check(program, element)
 
 
-def test_cons_refuses_an_element_off_the_list():
-    program, table = program_of("(. 1 (list #t))", 1601)
+def test_a_cell_construction_checks_at_several_element_types():
+    for source, element in [
+        ("(cons (prod# 1 (nil (prod#))))", IntType()),
+        ("(cons (prod# (#t (prod#)) (nil (prod#))))", BOOL),
+        (r"(cons (prod# #\a (nil (prod#))))", CharType()),
+    ]:
+        program, table = program_of(source, 1601)
+        TypeChecker(table=table).check(program, list_of(element))
+
+
+def test_a_cell_refuses_an_element_off_the_list():
+    program, table = program_of("(cons (prod# 1 (nil (prod#))))", 1602)
 
     with pytest.raises(TypeCheckError):
-        TypeChecker(table=table).check(program, ListType(IntType()))
+        TypeChecker(table=table).check(program, list_of(BOOL))
 
 
-def test_cons_builds_a_list_of_lists():
-    # The instance is read off the checked type whatever its sort, so a compound
-    # one instantiates as readily as a ground one.
-    program, table = program_of("(. (list 1) (list (list 2)))", 1602)
+def test_a_cell_builds_a_list_of_lists():
+    # The payload is read off the checked type whatever its sort, so a compound
+    # element type is taken as readily as a ground one.
+    program, table = program_of("(cons (prod# '(1) (nil (prod#))))", 1603)
 
-    TypeChecker(table=table).check(program, ListType(ListType(IntType())))
+    TypeChecker(table=table).check(program, list_of(list_of(IntType())))
 
 
 def test_a_polymorphic_builtin_is_not_checkable_as_a_reference():
     # A scheme is instantiated where its binder is applied, so naming one
     # without applying it is refused — at the function type it would have at an
     # instance as readily as at any other.
-    program, table = program_of("head", 1603)
+    program, table = program_of("head", 1604)
     ty = FunType(
         return_type=IntType(),
-        argument_type=ProdType([ListType(IntType())]),
+        argument_type=ProdType([list_of(IntType())]),
     )
 
     for checked in [ty, IntType()]:
@@ -468,20 +751,20 @@ def test_a_polymorphic_builtin_is_not_checkable_as_a_reference():
 
 
 def test_a_binder_can_be_ascribed_a_compound_type():
-    program, table = program_of(
-        "(letrec (((ascribe# xs (@list @int)) (list 1))) xs)", 1640
-    )
+    program, table = program_of("(letrec (((ascribe# xs (@list @int)) '(1))) xs)", 1640)
 
-    TypeChecker(table=table).check(program, ListType(IntType()))
+    TypeChecker(table=table).check(program, list_of(IntType()))
 
 
 def test_a_compound_ascription_off_its_initializer_is_refused():
     program, table = program_of(
-        "(letrec (((ascribe# xs (@list @int)) (list #t))) xs)", 1641
+        "(letrec (((ascribe# xs (@list @int))"
+        " (cons (prod# (#t (prod#)) (nil (prod#)))))) xs)",
+        1641,
     )
 
     with pytest.raises(TypeCheckError):
-        TypeChecker(table=table).check(program, ListType(IntType()))
+        TypeChecker(table=table).check(program, list_of(IntType()))
 
 
 def test_a_parameter_cannot_be_ascribed_a_quantified_type():
@@ -504,7 +787,7 @@ def test_a_declared_polymorphic_binder_is_used_at_two_instances():
     checker = TypeChecker(table=table)
     checker.declaration(program)
 
-    for source, ty in [("(id 1)", IntType()), ("(id #t)", BoolType())]:
+    for source, ty in [("(id 1)", IntType()), ("(id (#t (prod#)))", BOOL)]:
         use, uses = program_of(source, 1644)
         TypeChecker(table=uses, store=checker.store).check(use, ty)
 
@@ -541,7 +824,7 @@ def test_a_polymorphic_declaration_passes_its_variable_through():
     checker = TypeChecker(table=table)
     checker.declaration(program)
 
-    use, uses = program_of("(first (list 1 2))", 1648)
+    use, uses = program_of("(first '(1 2))", 1648)
     TypeChecker(table=uses, store=checker.store).check(use, IntType())
 
 
@@ -552,20 +835,20 @@ def test_a_polymorphic_declaration_passes_its_variable_through():
 
 
 def test_tuple_constructions_check_positionally():
-    program, table = program_of("(prod# 1 #t)", 1470)
+    program, table = program_of("(prod# 1 (#t (prod#)))", 1470)
 
-    TypeChecker(table=table).check(program, ProdType([IntType(), BoolType()]))
+    TypeChecker(table=table).check(program, ProdType([IntType(), BOOL]))
 
-    program, table = program_of("(prod# 1 #t)", 1470)
+    program, table = program_of("(prod# 1 (#t (prod#)))", 1470)
     with pytest.raises(TypeCheckError):
-        TypeChecker(table=table).check(program, ProdType([BoolType(), IntType()]))
+        TypeChecker(table=table).check(program, ProdType([BOOL, IntType()]))
 
 
 def test_a_field_count_off_a_tuple_is_refused():
     program, table = program_of("(prod# 1)", 1471)
 
     with pytest.raises(TypeCheckError):
-        TypeChecker(table=table).check(program, ProdType([IntType(), BoolType()]))
+        TypeChecker(table=table).check(program, ProdType([IntType(), BOOL]))
 
 
 def test_a_lambda_inhabits_a_function_type_over_a_tuple():
@@ -586,7 +869,7 @@ def test_an_application_through_a_tuple_argument_type_checks_its_operands():
 
     TypeChecker(table=table).check(program, ty)
 
-    program, table = program_of("(lambda (f) (f #t))", 1473)
+    program, table = program_of("(lambda (f) (f (#t (prod#))))", 1473)
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).check(program, ty)
 
@@ -599,7 +882,7 @@ def test_every_integer_checks_at_int_and_nothing_else_ground(value: int):
     expr = Integer(value)
 
     TypeChecker().check(expr, IntType())
-    for ty in [CharType(), BoolType()]:
+    for ty in [CharType(), BOOL]:
         with pytest.raises(TypeCheckError):
             TypeChecker().check(expr, ty)
 
@@ -618,7 +901,7 @@ def test_an_ascribed_letrec_binder_reads_its_type_from_source():
 
 
 def test_an_ascribed_letrec_initializer_off_its_ascription_is_refused():
-    program, table = program_of("(letrec (((ascribe# n @int) #t)) n)", 1481)
+    program, table = program_of("(letrec (((ascribe# n @int) (#t (prod#)))) n)", 1481)
 
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).check(program, IntType())
@@ -630,7 +913,7 @@ def test_an_ascribed_letrec_binder_checks_its_body_at_the_ascription():
     program, table = program_of("(letrec (((ascribe# n @int) 5)) n)", 1482)
 
     with pytest.raises(TypeCheckError):
-        TypeChecker(table=table).check(program, BoolType())
+        TypeChecker(table=table).check(program, BOOL)
 
 
 def test_an_ascription_contradicting_a_standing_one_is_refused():
@@ -638,7 +921,7 @@ def test_an_ascription_contradicting_a_standing_one_is_refused():
     # `binding` surfaces that as a type error rather than letting it escape.
     program, table = program_of("(letrec (((ascribe# n @int) 5)) n)", 1483)
     store: Context = Context.default()
-    store.register(var("n", 1483), BoolType())
+    store.register(var("n", 1483), BOOL)
 
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table, store=store).check(program, IntType())
@@ -668,7 +951,7 @@ def test_an_ascribed_lambda_parameter_off_its_signature_is_refused():
 
 
 def test_every_nullary_type_can_be_ascribed():
-    for spelling, ty in [("@int", IntType()), ("@bool", BoolType())]:
+    for spelling, ty in [("@int", IntType()), ("@bool", BOOL)]:
         program, table = program_of(f"(lambda ((ascribe# x {spelling})) x)", 1487)
         TypeChecker(table=table).check(program, unary(ty, ty))
 
@@ -698,7 +981,7 @@ def test_an_ascribed_define_reads_its_type_from_source():
 
 
 def test_an_ascribed_define_initializer_off_its_ascription_is_refused():
-    program, table = program_of("(define (ascribe# n @int) #t)", 1491)
+    program, table = program_of("(define (ascribe# n @int) (#t (prod#)))", 1491)
 
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).declaration(program)
@@ -723,7 +1006,7 @@ def test_an_unascribed_define_checks_at_a_standing_ascription():
 def test_a_define_ascription_contradicting_a_standing_one_is_refused():
     program, table = program_of("(define (ascribe# n @int) 5)", 1494)
     store: Context = Context.default()
-    store.register(Symbol("n"), BoolType())
+    store.register(Symbol("n"), BOOL)
 
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table, store=store).declaration(program)
@@ -744,3 +1027,94 @@ def test_a_declaration_refuses_a_non_define():
 
     with pytest.raises(TypeCheckError):
         TypeChecker(table=table).declaration(program)
+
+
+# -- free variables --------------------------------------------------------------
+
+
+def test_a_free_variable_checks_at_the_type_it_ranges_over():
+    for name, written, ty in [
+        ("n", "@int", IntType()),
+        ("c", "@char", CharType()),
+    ]:
+        program, table = program_of(f"(forall (ascribe# {name} {written}))", 1480)
+        checker = TypeChecker(table=table)
+
+        checker.check(program, ty)
+
+        # Registered on sight: the form is the binding position as well as the
+        # occurrence, so nothing else would ever carry the ascription in.
+        assert checker.store[Symbol(name)] == ty
+
+
+def test_a_free_variable_over_bool_is_refused():
+    # `@bool` is a sum, and a sum is not a ground type. A free variable stands
+    # for a range of values the analysis takes it over, and only a type written
+    # as a bare symbol has one — which `@bool` is written as and no longer is.
+    program, table = program_of("(forall (ascribe# b @bool))", 1482)
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table).check(program, BOOL)
+
+
+def test_a_free_variable_refuses_a_foreign_type():
+    program, table = program_of("(forall (ascribe# n @int))", 1481)
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table).check(program, BOOL)
+
+
+def test_a_free_variable_answers_its_own_type():
+    # `type_of` is what lets the form stand at the top level and in an operand
+    # position that determines a scheme's instance.
+    program, table = program_of("(forall (ascribe# n @int))", 1482)
+
+    assert TypeChecker(table=table).type_of(program) == IntType()
+
+
+def test_only_a_ground_type_has_values_to_range_over():
+    # A `Support` is a set of integers, so only a nullary type's values are a
+    # range: list data has no bound and a procedure is not a value to quantify
+    # across.
+    for written in ["(@list @int)", "(@fun (@prod @int) @int)", "(@variadic @int)"]:
+        program, table = program_of(f"(forall (ascribe# v {written}))", 1483)
+
+        with pytest.raises(TypeCheckError):
+            TypeChecker(table=table).type_of(program)
+
+
+def test_a_free_variable_refuses_a_polymorphic_ascription():
+    # The refusal a parameter takes: the variable stands for values of the one
+    # type it is written at, so a quantifier would bind what no occurrence
+    # instantiates.
+    program, table = program_of(
+        "(forall (ascribe# n (forall# (a) @int)))",
+        1484,
+    )
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table).type_of(program)
+
+
+def test_two_occurrences_of_one_free_variable_agree():
+    program, table = program_of(
+        "(lt (forall (ascribe# n @int)) (forall (ascribe# n @int)))",
+        1485,
+    )
+    checker = TypeChecker(table=table)
+
+    checker.check(program, BOOL)
+
+    assert checker.store[Symbol("n")] == IntType()
+
+
+def test_two_occurrences_at_two_types_are_refused():
+    # Both occurrences name the one variable, so the second ascription is a
+    # rebinding and `Context.register` refuses it.
+    program, table = program_of(
+        "(lt (forall (ascribe# n @int)) (forall (ascribe# n @bool)))",
+        1486,
+    )
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table).check(program, BOOL)

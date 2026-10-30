@@ -7,8 +7,8 @@ from Expander import expand, parse
 from Reader import read
 from Resolve import BindingTable, bindings
 from Syntax import Expr, Scope
-from Syntax.Type import BoolType, CharType, IntType, ListType, Type
-from TypeCheck import TypeCheckError, TypeChecker, check_toplevel
+from Syntax.Type import BOOL, CharType, IntType, list_of, Type
+from TypeCheck import TypeChecker, TypeCheckError, check_toplevel
 
 # Counters from the 1800s, so no expectation here depends on the global fresh-uid
 # counter and no uid collides with another test file's.
@@ -56,13 +56,10 @@ def test_an_unascribed_reference_has_no_type():
 
 
 def test_an_application_has_its_heads_return_type():
-    source = (
-        "(letrec (((ascribe# f (@fun (@prod @int) @bool)) (lambda (x) #t)))"
-        " (f 1))"
-    )
+    source = "(letrec (((ascribe# f (@fun (@prod @int) @bool)) (lambda (x) (#t (prod#))))) (f 1))"
     program, checker = checker_of(source, 1803)
 
-    assert checker.type_of(program) == BoolType()
+    assert checker.type_of(program) == BOOL
 
 
 def test_a_polymorphic_head_is_instantiated_from_its_operands():
@@ -74,8 +71,8 @@ def test_a_polymorphic_head_is_instantiated_from_its_operands():
     assert checker.type_of(program) == IntType()
 
 
-def test_an_if_takes_its_consequents_type():
-    program, checker = checker_of("(if #t 1 2)", 1805)
+def test_a_match_takes_its_first_clauses_type():
+    program, checker = checker_of("(match (le 1 2) ((#t) 1) ((#f) 2))", 1805)
 
     assert checker.type_of(program) == IntType()
 
@@ -83,7 +80,7 @@ def test_an_if_takes_its_consequents_type():
 def test_a_quoted_datum_takes_the_type_of_its_first_element():
     program, checker = checker_of("'(1 2 3)", 1806)
 
-    assert checker.type_of(program) == ListType(IntType())
+    assert checker.type_of(program) == list_of(IntType())
 
 
 def test_a_quoted_empty_list_determines_no_type():
@@ -116,21 +113,21 @@ def test_a_lambda_has_no_type_of_its_own():
 def test_a_quoted_list_of_integers_inhabits_a_list_of_integers():
     program, checker = checker_of("'(1 2 3)", 1810)
 
-    checker.check(program, ListType(IntType()))
+    checker.check(program, list_of(IntType()))
 
 
 def test_a_quoted_empty_list_inhabits_every_list_type():
-    for element in [IntType(), CharType(), ListType(IntType())]:
+    for element in [IntType(), CharType(), list_of(IntType())]:
         program, checker = checker_of("'()", 1811)
 
-        checker.check(program, ListType(element))
+        checker.check(program, list_of(element))
 
 
 def test_a_quoted_list_is_refused_where_an_element_does_not_inhabit():
     program, checker = checker_of("'(1 #\\a)", 1812)
 
     with pytest.raises(TypeCheckError):
-        checker.check(program, ListType(IntType()))
+        checker.check(program, list_of(IntType()))
 
 
 def test_a_quoted_list_does_not_inhabit_the_type_of_its_elements():
@@ -143,11 +140,11 @@ def test_a_quoted_list_does_not_inhabit_the_type_of_its_elements():
 def test_a_quoted_list_of_lists_inhabits_a_list_of_lists():
     program, checker = checker_of("'((1) (2 3))", 1814)
 
-    checker.check(program, ListType(ListType(IntType())))
+    checker.check(program, list_of(list_of(IntType())))
 
 
 def test_a_quoted_symbol_inhabits_nothing():
-    for ty in [IntType(), BoolType(), ListType(IntType())]:
+    for ty in [IntType(), BOOL, list_of(IntType())]:
         program, checker = checker_of("'a", 1815)
 
         with pytest.raises(TypeCheckError):
@@ -171,7 +168,7 @@ def listed(source: str, expand_at: int) -> tuple[Expr, TypeChecker]:
 def test_eq_compares_two_lists():
     program, checker = listed("(eq xs ys)", 1816)
 
-    checker.check(program, BoolType())
+    checker.check(program, BOOL)
 
 
 def test_eq_compares_a_list_against_the_empty_list():
@@ -179,22 +176,22 @@ def test_eq_compares_a_list_against_the_empty_list():
     # it — which is why the `quote` arm and `solved` arrive together.
     program, checker = listed("(eq xs '())", 1817)
 
-    checker.check(program, BoolType())
+    checker.check(program, BOOL)
 
 
 def test_eq_compares_two_integers():
     program, checker = checker_of("(eq 1 2)", 1818)
 
-    checker.check(program, BoolType())
+    checker.check(program, BOOL)
 
 
 def test_eq_is_refused_where_its_operands_disagree():
     # `a` is taken at `@int` from the first operand, and the second is refused
     # at that instance.
-    program, checker = checker_of("(eq 1 #t)", 1819)
+    program, checker = checker_of("(eq 1 (#t (prod#)))", 1819)
 
     with pytest.raises(TypeCheckError):
-        checker.check(program, BoolType())
+        checker.check(program, BOOL)
 
 
 def test_len_measures_a_list():
@@ -216,7 +213,7 @@ def test_eq_is_refused_where_no_operand_determines_its_instance():
     program, checker = checker_of("(eq '() '())", 1822)
 
     with pytest.raises(TypeCheckError):
-        checker.check(program, BoolType())
+        checker.check(program, BOOL)
 
 
 # -- check_toplevel --------------------------------------------------------------
@@ -229,20 +226,20 @@ def test_a_top_level_declaration_is_checked():
 
 
 def test_a_top_level_declaration_is_refused_at_a_type_it_does_not_inhabit():
-    program, checker = checker_of("(define (ascribe# n @int) #t)", 1824)
+    program, checker = checker_of("(define (ascribe# n @int) (#t (prod#)))", 1824)
 
     with pytest.raises(TypeCheckError):
         check_toplevel(program, checker)
 
 
 def test_a_top_level_expression_is_checked_at_the_type_it_has():
-    program, checker = checker_of("(if #t 1 2)", 1825)
+    program, checker = checker_of("(match (le 1 2) ((#t) 1) ((#f) 2))", 1825)
 
     check_toplevel(program, checker)
 
 
 def test_a_top_level_expression_is_refused_where_its_branches_disagree():
-    program, checker = checker_of("(if #t 1 #\\a)", 1826)
+    program, checker = checker_of("(match (le 1 2) ((#t) 1) ((#f) #\\a))", 1826)
 
     with pytest.raises(TypeCheckError):
         check_toplevel(program, checker)
@@ -252,8 +249,7 @@ def test_a_declaration_is_visible_to_a_later_form():
     # What the carried store is for: the ascription of a `define` outlives the
     # form that wrote it, so a later form's application of it checks.
     declaration, table = program_of(
-        "(define (ascribe# double (@fun (@prod @int) @int))"
-        " (lambda (x) (+ x x)))",
+        "(define (ascribe# double (@fun (@prod @int) @int)) (lambda (x) (+ x x)))",
         1827,
     )
     checker = TypeChecker(table=table)

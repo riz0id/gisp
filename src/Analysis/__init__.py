@@ -3,7 +3,6 @@ from enum import Enum, StrEnum, auto
 from typing import Final
 
 from Analysis.CExpr import (
-    BooleanCExpr,
     CExpr,
     CharCExpr,
     ComparisonCExpr,
@@ -18,10 +17,12 @@ from Analysis.CExpr import (
 from Analysis.Path import Path
 from Analysis.Support import Support
 from Resolve import BindingTable, meaning
-from Syntax import Expr, SList, Symbol, binder_name
+from Syntax import Expr, Integer, SList, Symbol, binder_name
 from Syntax.Type import (
+    BOOL,
     CONSTRUCTORS,
-    BoolType,
+    FALSE,
+    TRUE,
     CharType,
     Context,
     FunType,
@@ -38,12 +39,30 @@ class Region(Enum):
     EXPR = auto()
     PAIRS = auto()
     PAIR = auto()
+    CLAUSE = auto()
 
 
 @dataclass(frozen=True, slots=True)
 class Guard:
     test: CExpr
+    pattern: Expr
     consequent: bool
+
+
+def clause_pattern(clause: Expr) -> Expr:
+    match clause:
+        case SList([pattern, _]):
+            return pattern
+        case _:
+            return clause
+
+
+def clause_body(clause: Expr) -> Expr:
+    match clause:
+        case SList([_, body]):
+            return body
+        case _:
+            return clause
 
 
 def occurs_in(var: Symbol, expr: Expr, table: BindingTable) -> bool:
@@ -74,10 +93,18 @@ def occurs_in(var: Symbol, expr: Expr, table: BindingTable) -> bool:
                             worklist.append(initializer)
                         case _:
                             worklist.append(pair)
+            case SList([Symbol() as head, scrutinee, *clauses]) if (
+                head.identifier == "match"
+            ) and clauses:
+                worklist.append(scrutinee)
+                worklist += [clause_body(clause) for clause in clauses]
             case SList([Symbol() as head, _, init]) if head.identifier == "define":
-                # Position 1 is a binding site, not an occurrence, so only the
-                # initializer is searched.
                 worklist.append(init)
+            case SList([Symbol() as head, operand]) if (
+                head.identifier == "forall"
+            ) and (bound := binder_name(operand)) is not None:
+                if meaning(bound, table) == target:
+                    return True
             case SList(items):
                 worklist += items
             case _:
@@ -98,13 +125,15 @@ def conditions(
         expr: Expr = worklist.pop()
 
         match expr:
-            case SList([Symbol() as head, test, consequent, alternative]) if (
-                head.identifier == "if"
-            ):
-                if occurs_in(var=var, expr=test, table=table):
-                    rets.append(test)
+            case SList([Symbol() as head, scrutinee, *clauses]) if (
+                head.identifier == "match"
+            ) and clauses:
+                if occurs_in(var=var, expr=scrutinee, table=table):
+                    rets.append(scrutinee)
 
-                worklist += reversed([test, consequent, alternative])
+                worklist += reversed(
+                    [scrutinee, *[clause_body(clause) for clause in clauses]]
+                )
             case SList([Symbol() as head, SList(), body]) if (
                 head.identifier == "lambda"
             ):
@@ -126,6 +155,8 @@ def conditions(
                 worklist += reversed([*initializers, body])
             case SList([Symbol() as head, _, init]) if head.identifier == "define":
                 worklist.append(init)
+            case SList([Symbol() as head, _]) if head.identifier == "forall":
+                pass
             case SList(items):
                 worklist += reversed(items)
             case _:
@@ -172,11 +203,91 @@ def occurrences(
 
                 children.append((path.child(2), body))
                 worklist += reversed(children)
+            case SList([Symbol() as head, scrutinee, *clauses]) if (
+                head.identifier == "match"
+            ) and clauses:
+                reached: list[tuple[Path, Expr]] = [(path.child(1), scrutinee)]
+
+                for position, clause in enumerate(clauses):
+                    match clause:
+                        case SList([_, body]):
+                            reached.append((path.child(2 + position).child(1), body))
+                        case _:
+                            reached.append((path.child(2 + position), clause))
+
+                worklist += reversed(reached)
             case SList([Symbol() as head, _, init]) if head.identifier == "define":
-                # Position 1 is a binding site, not an occurrence, so only the
-                # initializer is enqueued.
                 worklist.append((path.child(2), init))
             case SList([Symbol() as head, *_]) if head.identifier == "quote":
+                pass
+            case SList([Symbol() as head, operand]) if (
+                head.identifier == "forall"
+            ) and (bound := binder_name(operand)) is not None:
+                if meaning(bound, table) == target:
+                    rets.append(path)
+            case SList(items):
+                worklist += reversed(
+                    [
+                        (path.child(position), item)
+                        for position, item in enumerate(items)
+                    ]
+                )
+            case _:
+                pass
+
+    return rets
+
+
+def arms(program: Expr) -> list[Path]:
+    rets: list[Path] = []
+    worklist: list[tuple[Path, Expr]] = [(Path(), program)]
+
+    while len(worklist) > 0:
+        path, expr = worklist.pop()
+
+        match expr:
+            case SList([Symbol() as head, scrutinee, *clauses]) if (
+                head.identifier == "match"
+            ) and clauses:
+                reached: list[tuple[Path, Expr]] = [(path.child(1), scrutinee)]
+
+                for position, clause in enumerate(clauses):
+                    match clause:
+                        case SList([_, body]):
+                            arm: Path = path.child(2 + position).child(1)
+                            rets.append(arm)
+                            reached.append((arm, body))
+                        case _:
+                            reached.append((path.child(2 + position), clause))
+
+                worklist += reversed(reached)
+            case SList([Symbol() as head, SList(), body]) if (
+                head.identifier == "lambda"
+            ):
+                worklist.append((path.child(2), body))
+            case SList([Symbol() as head, SList(pairs), body]) if (
+                head.identifier == "letrec"
+            ):
+                children: list[tuple[Path, Expr]] = []
+
+                for position, pair in enumerate(pairs):
+                    match pair:
+                        case SList([name, initializer]) if (
+                            binder_name(name) is not None
+                        ):
+                            children.append(
+                                (path.child(1).child(position).child(1), initializer)
+                            )
+                        case _:
+                            children.append((path.child(1).child(position), pair))
+
+                children.append((path.child(2), body))
+                worklist += reversed(children)
+            case SList([Symbol() as head, _, init]) if head.identifier == "define":
+                worklist.append((path.child(2), init))
+            case SList([Symbol() as head, *_]) if head.identifier == "quote":
+                pass
+            case SList([Symbol() as head, _]) if head.identifier == "forall":
                 pass
             case SList(items):
                 worklist += reversed(
@@ -185,6 +296,31 @@ def occurrences(
                         for position, item in enumerate(items)
                     ]
                 )
+            case _:
+                pass
+
+    return rets
+
+
+def opaque(program: Expr, table: BindingTable) -> list[Symbol]:
+    rets: list[Symbol] = []
+    worklist: list[Expr] = [program]
+
+    while len(worklist) > 0:
+        expr: Expr = worklist.pop()
+
+        match expr:
+            case SList([Symbol() as head, operand]) if (
+                head.identifier == "forall"
+            ) and (bound := binder_name(operand)) is not None:
+                binder: Symbol = meaning(bound, table)
+
+                if binder not in rets:
+                    rets.append(binder)
+            case SList([Symbol() as head, *_]) if head.identifier == "quote":
+                pass
+            case SList(items):
+                worklist += reversed(items)
             case _:
                 pass
 
@@ -218,16 +354,40 @@ def path_conditions(
                         raise OccurrenceError(f"step {step} of {path} selects {name}")
                     case _:
                         region = Region.EXPR
+            case Region.CLAUSE:
+                match items:
+                    case [pattern, _] if position == 0:
+                        raise OccurrenceError(
+                            f"step {step} of {path} selects {pattern}"
+                        )
+                    case _:
+                        region = Region.EXPR
             case Region.EXPR:
                 match items:
-                    case [Symbol() as head, test, _, _] if head.identifier == "if":
-                        if position in (2, 3):
+                    case [Symbol() as head, scrutinee, *clauses] if (
+                        head.identifier == "match"
+                    ) and clauses:
+                        if position >= 2 and position - 2 < len(clauses):
+                            test: CExpr = CExpr.from_expr(scrutinee, table)
+                            selected: int = position - 2
+
+                            for earlier in clauses[:selected]:
+                                rets.append(
+                                    Guard(
+                                        test=test,
+                                        pattern=clause_pattern(earlier),
+                                        consequent=False,
+                                    )
+                                )
+
                             rets.append(
                                 Guard(
-                                    test=CExpr.from_expr(test, table),
-                                    consequent=position == 2,
+                                    test=test,
+                                    pattern=clause_pattern(clauses[selected]),
+                                    consequent=True,
                                 )
                             )
+                            region = Region.CLAUSE
                     case [Symbol() as head, SList(), _] if head.identifier == "lambda":
                         if position == 1:
                             raise OccurrenceError(
@@ -246,6 +406,10 @@ def path_conditions(
                             raise OccurrenceError(
                                 f"step {step} of {path} selects quoted data"
                             )
+                    case [Symbol() as head, _] if head.identifier == "forall":
+                        raise OccurrenceError(
+                            f"step {step} of {path} descends into a free variable"
+                        )
                     case _:
                         pass
 
@@ -269,39 +433,20 @@ def comparison(relation: Relation, polarity: bool, bound: int) -> Support:
     return support if polarity else support.complement()
 
 
-# The types whose values have a representation of their own, and which are
-# therefore pairwise disjoint: an `Integer` is never a `Char`, and neither is
-# ever one of the symbols `#t` and `#f` a comparison answers with.
-GROUNDS: Final[tuple[Type, ...]] = (IntType(), CharType(), BoolType())
+GROUNDS: Final[tuple[Type, ...]] = (IntType(), CharType(), BOOL)
 
 
 def constructs(head: Symbol, table: BindingTable) -> bool:
-    # Whether a head names a constructor rather than an application head.
-    # `check` tells the two apart by the type it is checking against, which a
-    # shallow reading does not have, so a constructor is left unread:
-    # `Context.default()` ascribes `prod#` a function returning the empty
-    # product, and `(prod# 1 #t)` is a two-field product and not that.
-    #
-    # The identifiers come from `Syntax.Type`, where `is_constructor` compares a
-    # resolved head against the one its sort expects.
     return meaning(head, table) in CONSTRUCTORS
 
 
 def ascription(operand: CExpr, context: Context, table: BindingTable) -> Type | None:
-    # The type of an operand when the ascriptions determine one, and `None`
-    # otherwise. Deliberately shallow: the type checker only checks, so there
-    # is nothing to ask for a type, and an operand the analysis cannot type is
-    # one it declines to read.
     match operand:
         case IntegerCExpr():
             return IntType()
         case CharCExpr():
             return CharType()
-        case BooleanCExpr():
-            return BoolType()
         case VarCExpr(symbol):
-            # The arm that types `#t` and `#f`: both read as ordinary symbols,
-            # and `Context.default()` ascribes them `@bool`.
             binder: Symbol = meaning(symbol, table)
 
             return context[binder] if binder in context else None
@@ -312,38 +457,23 @@ def ascription(operand: CExpr, context: Context, table: BindingTable) -> Type | 
             | EquivalenceCExpr()
             | NegationCExpr()
         ):
-            # `lt`, `and`, `or`, `eq`, and `not` all answer with a boolean.
-            return BoolType()
+            return BOOL
         case ListCExpr([Symbol() as head, *_]) if not constructs(head, table):
             applied: Symbol = meaning(head, table)
 
             if applied not in context:
                 return None
 
-            # An application has the return type of whatever its head is, and
-            # a head ascribed anything but a function type says nothing.
             match context[applied]:
                 case FunType(return_type=return_type):
                     return return_type
                 case _:
                     return None
         case _:
-            # A headless list, a construction, and `NilCExpr` — of which only a
-            # construction is reachable from source.
             return None
 
 
 def disjoint(left: Type, right: Type) -> bool:
-    # Whether no value inhabits both types, which is what licenses reading an
-    # `eq` between them as false in every state: `eq` is total over `Expr`, and
-    # every sort's `__eq__` answers `False` for a value of another sort.
-    #
-    # Only the ground types qualify, and every exclusion is load-bearing. The
-    # empty list inhabits `(@list t)` for every `t`, so two list types are not
-    # disjoint; lists, products, and sums are all `SList` and can coincide;
-    # `eq` *raises* on a procedure rather than answering, so a function type
-    # must never be what makes a branch dead; and the variadic types classify
-    # no values at all.
     return left in GROUNDS and right in GROUNDS and left != right
 
 
@@ -353,8 +483,6 @@ def disjoint_operands(
     context: Context,
     table: BindingTable,
 ) -> bool:
-    # A `match` guard cannot bind the two ascriptions it has to compare, so the
-    # pair is read here.
     lhs: Type | None = ascription(left, context, table)
     rhs: Type | None = ascription(right, context, table)
 
@@ -376,9 +504,6 @@ def satisfying(
         case ComparisonCExpr(IntegerCExpr() as lit, VarCExpr() as ref) if meaning(
             ref.symbol, table
         ) == meaning(target, table):
-            # The mirrored bound is not a relation of its own: `k < x` is
-            # `(not (or (lt x k) (eq x k)))`, and the rewrite recurses so only
-            # `lt` and `eq` are ever read directly.
             return satisfying(
                 NegationCExpr(
                     DisjunctionCExpr(
@@ -394,14 +519,6 @@ def satisfying(
         case EquivalenceCExpr(left, right) if disjoint_operands(
             left, right, context, table
         ):
-            # Operands of disjoint types never compare equal, so the test is
-            # false whatever the target is: the consequent is reached by no
-            # state at all, and the alternative is reached by every one of
-            # them, which says nothing.
-            #
-            # This reads `eq` and not `lt`, because `eq` is total over data and
-            # answers `#f` on a mismatch while `lt` raises — and a test that
-            # raises is not a test that is false.
             return Support.empty() if polarity else Support.integers()
         case EquivalenceCExpr(VarCExpr(symbol), IntegerCExpr(value)) | EquivalenceCExpr(
             IntegerCExpr(value), VarCExpr(symbol)
@@ -419,8 +536,6 @@ def satisfying(
             rights: Support = satisfying(right, target, table, polarity, context)
 
             return lefts.union(rights) if polarity else lefts.intersection(rights)
-        case BooleanCExpr(value):
-            return Support.integers() if value.value is polarity else Support.empty()
         case ListCExpr([Symbol() as head, left_operand, right_operand]):
             builtin: Symbol = meaning(head, table)
 
@@ -444,18 +559,37 @@ def satisfying(
             return Support.integers()
 
 
+def matching(
+    test: CExpr,
+    pattern: Expr,
+    target: Symbol,
+    table: BindingTable,
+    polarity: bool,
+    context: Context,
+) -> Support:
+    match pattern:
+        case SList([Symbol() as head]) if meaning(head, table) == TRUE:
+            return satisfying(test, target, table, polarity, context)
+        case SList([Symbol() as head]) if meaning(head, table) == FALSE:
+            return satisfying(test, target, table, not polarity, context)
+        case Integer() as value if isinstance(test, VarCExpr) and meaning(
+            test.symbol, table
+        ) == meaning(target, table):
+            return comparison(Relation.EQ, polarity, int(value))
+        case _:
+            return Support.integers()
+
+
 def contradictory(
     test: CExpr,
+    pattern: Expr,
     consequent: bool,
     context: Context,
     table: BindingTable,
 ) -> bool:
-    # Whether `test` cannot take the truth value `consequent`, which is to say
-    # that the states giving it that value are none. The target is
-    # `Symbol.toplevel()` because no reference resolves to it, so every reading
-    # keyed on the target fails and only the facts that hold of every variable
-    # are left to empty the support.
-    return satisfying(test, Symbol.toplevel(), table, consequent, context).is_empty()
+    return matching(
+        test, pattern, Symbol.toplevel(), table, consequent, context
+    ).is_empty()
 
 
 def refinements(
@@ -469,7 +603,9 @@ def refinements(
     rets: list[Support] = [Support.integers()]
 
     for guard in guards:
-        support: Support = satisfying(guard.test, var, table, guard.consequent, context)
+        support: Support = matching(
+            guard.test, guard.pattern, var, table, guard.consequent, context
+        )
         rets.append(rets[-1].intersection(support))
 
     return rets
@@ -481,12 +617,9 @@ def unreachable(
     table: BindingTable,
     context: Context,
 ) -> bool:
-    # Whether no state reaches the end of `path`: some guard along it is false
-    # in the polarity that reaching the end commits to. A malformed path raises
-    # here as it does in `path_conditions`, but an unreadable guard does not —
-    # it simply says nothing, and a path of such guards is reachable.
     guards: list[Guard] = path_conditions(path, program, table)
 
     return any(
-        contradictory(guard.test, guard.consequent, context, table) for guard in guards
+        contradictory(guard.test, guard.pattern, guard.consequent, context, table)
+        for guard in guards
     )

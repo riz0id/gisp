@@ -14,6 +14,7 @@ __all__: list[str] = [
     "Unbound",
     "bindings",
     "meaning",
+    "pattern_binders",
     "resolve",
     "same_variable",
 ]
@@ -29,6 +30,28 @@ class Unbound(ResolveError):
 
 class Ambiguous(ResolveError):
     pass
+
+
+def pattern_binders(pattern: Expr) -> list[Symbol]:
+    # The binders a `match` pattern binds. A pattern's binding positions are
+    # nested wherever its constructor patterns are, so this is a walk and not a
+    # read of one position — which is what tells it apart from `binder_name`.
+    bound: list[Symbol] = []
+    stack: list[Expr] = [pattern]
+
+    while stack:
+        current: Expr = stack.pop()
+        name: Symbol | None = binder_name(current)
+
+        if name is not None:
+            bound.append(name)
+        elif isinstance(current, SList):
+            # A constructor pattern: position 0 names the constructor and binds
+            # nothing, while every operand is a pattern of its own. A literal
+            # pattern lands here as neither and binds nothing.
+            stack.extend(reversed(current.items[1:]))
+
+    return bound
 
 
 def bindings(expr: Expr, phase: Phase | None = None) -> BindingTable:
@@ -69,6 +92,36 @@ def bindings(expr: Expr, phase: Phase | None = None) -> BindingTable:
 
                 if declared is not None:
                     binders.append(declared)
+
+                for item in reversed(current.items):
+                    stack.append(item)
+            case SList([Symbol() as head, _, *clauses]) if (
+                head.identifier == "match"
+            ) and clauses:
+                # Every clause's pattern is a binding position, so a table
+                # rebuilt from a parsed tree has to find them: the parse phase
+                # resolved each against the expansion's table, and a later
+                # reader resolving the same spelling has to reach the same
+                # binder. `if` needed no arm here because it bound nothing.
+                for clause in clauses:
+                    match clause:
+                        case SList([pattern, _]):
+                            binders.extend(pattern_binders(pattern))
+                        case _:
+                            pass
+
+                for item in reversed(current.items):
+                    stack.append(item)
+            case SList([Symbol() as head, operand]) if head.identifier == "forall":
+                # A `forall` is a binding position and an occurrence of what it
+                # binds at once, so a table rebuilt from a parsed tree has to
+                # find its binder here: the parse phase resolved it against the
+                # expansion's table, and a later reader resolving the same
+                # spelling has to reach the same binder.
+                opaque: Symbol | None = binder_name(operand)
+
+                if opaque is not None:
+                    binders.append(opaque)
 
                 for item in reversed(current.items):
                     stack.append(item)

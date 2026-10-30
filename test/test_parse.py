@@ -6,7 +6,7 @@ import pytest
 from Expander import ParseError, expand, parse, strip, type_syntax
 from Reader import read
 from Resolve import Ambiguous, BindingTable, bindings
-from Syntax import Char, Expr, Integer, Keyword, Nil, Scope, SList, Symbol
+from Syntax import Char, Expr, Integer, Keyword, Scope, SList, Symbol
 
 # Fixtures inject deterministic counters from the 1300s so no expectation
 # depends on the global fresh-uid counter and no uid collides with another
@@ -131,16 +131,70 @@ def test_strip_discharges_scopes_everywhere():
 # -- inert core forms ------------------------------------------------------------
 
 
-def test_if_parses_positionally_with_a_bare_head():
+def test_a_match_parses_positionally_with_a_bare_head():
+    # The clause scopes are discharged by resolution: all three occurrences of
+    # `x` resolve to the one parameter, whatever scopes the clause gave them.
     x = Symbol("x", {Scope(1330)})
 
-    assert pipeline("(lambda (x) (if x x x))", 1330) == SList(
+    assert pipeline("(lambda (x) (match x ((#t) x) ((#f) x)))", 1330) == SList(
         [
             Symbol("lambda"),
             SList([x]),
-            SList([Symbol("if"), x, x, x]),
+            SList(
+                [
+                    Symbol("match"),
+                    x,
+                    SList([SList([Symbol("#t")]), x]),
+                    SList([SList([Symbol("#f")]), x]),
+                ]
+            ),
         ]
     )
+
+
+def test_a_pattern_resolves_its_binders_and_keeps_its_constructor():
+    # A constructor head resolves as a reference and comes back as itself when
+    # nothing binds it, which is what makes `.` and `list` readable as the
+    # constructors they name.
+    assert pipeline("(match xs ((cons x r) x))", 1332) == SList(
+        [
+            Symbol("match"),
+            Symbol("xs"),
+            SList(
+                [
+                    SList(
+                        [
+                            Symbol("cons"),
+                            Symbol("x", {Scope(1332)}),
+                            Symbol("r", {Scope(1332)}),
+                        ]
+                    ),
+                    Symbol("x", {Scope(1332)}),
+                ]
+            ),
+        ]
+    )
+
+
+def test_a_literal_pattern_is_a_leaf():
+    assert pipeline("(match n (0 1))", 1334) == SList(
+        [
+            Symbol("match"),
+            Symbol("n"),
+            SList([Integer(0), Integer(1)]),
+        ]
+    )
+
+
+def test_a_pattern_head_that_is_not_a_symbol_is_refused():
+    # Expansion leaves it alone — a pattern's head is re-emitted as written,
+    # because resolution is what decides whether it names a constructor — so
+    # this is the one malformed pattern the parse phase is what refuses. Every
+    # other one is caught before this phase sees it.
+    expanded = expand(read("(match n (((ascribe# x @int)) b))"), fresh=counter(1336))
+
+    with pytest.raises(ParseError):
+        parse(expanded, bindings(expanded))
 
 
 def test_constants_are_leaves():
@@ -174,7 +228,7 @@ def test_unexpanded_macro_forms_are_refused():
 @pytest.mark.parametrize(
     "source",
     [
-        "(if x y)",
+        "(match x)",
         "(lambda x x)",
         "(quote)",
         "(letrec ((f)) x)",
@@ -555,7 +609,7 @@ def test_a_malformed_or_unknown_type_form_is_refused(source: str):
 
 
 def test_a_datum_is_not_a_type():
-    for datum in [Integer(1), Char(97), Keyword("x"), Nil(), SList([])]:
+    for datum in [Integer(1), Char(97), Keyword("x"), SList([])]:
         with pytest.raises(ParseError):
             type_syntax(datum, BindingTable())
 
@@ -573,3 +627,46 @@ def test_a_nested_quantifier_parses_and_is_left_to_elaboration():
     assert head == Symbol("@list")
     assert quantifier == Symbol("forall#")
     assert bound == occurrence
+
+
+# -- free variables --------------------------------------------------------------
+
+
+def test_forall_resolves_its_binder_and_reads_its_type():
+    # Read exactly as a lambda parameter's position is: the binder resolves and
+    # the type operand is read as a type, which is what drops the scope the
+    # expansion gave the operand.
+    assert pipeline("(forall (ascribe# n @int))", 1380) == SList(
+        [
+            Symbol("forall"),
+            SList([Symbol("ascribe#"), Symbol("n"), Symbol("@int")]),
+        ]
+    )
+
+
+def test_a_bare_reference_reaches_a_free_variable():
+    # The binder is in the table, so an ordinary reference resolves to it
+    # rather than falling back to its own spelling.
+    free = Symbol("n")
+
+    assert pipeline("(lt (forall (ascribe# n @int)) n)", 1382) == SList(
+        [
+            Symbol("lt"),
+            SList(
+                [Symbol("forall"), SList([Symbol("ascribe#"), free, Symbol("@int")])]
+            ),
+            free,
+        ]
+    )
+
+
+def test_a_malformed_forall_is_refused_by_the_parse_phase():
+    # The expander refuses one first, so this is reached only by syntax built
+    # directly. The arm is what keeps a `forall` from falling into the
+    # application arm below it and being read as a call to an unbound name.
+    for form in [
+        SList([Symbol("forall")]),
+        SList([Symbol("forall"), Symbol("n"), Integer(1)]),
+    ]:
+        with pytest.raises(ParseError):
+            parse(form, BindingTable())

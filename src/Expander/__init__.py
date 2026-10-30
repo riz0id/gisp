@@ -4,11 +4,9 @@ from dataclasses import dataclass, field
 from Expander.Parse import ParseError, parse, strip, type_syntax
 from Resolve import Binding, BindingTable, Phase, Unbound, resolve
 from Syntax import (
-    Boolean,
     Char,
     Expr,
     Integer,
-    Nil,
     Scope,
     SList,
     Symbol,
@@ -17,6 +15,7 @@ from Syntax import (
 )
 
 __all__: list[str] = [
+    "KEYWORDS",
     "ExpandError",
     "ParseError",
     "expand",
@@ -31,9 +30,10 @@ KEYWORDS: frozenset[str] = frozenset(
         "letrec",
         "letrec-syntax",
         "syntax-rules",
-        "if",
+        "match",
         "quote",
         "define",
+        "forall",
         "ascribe#",
     }
 )
@@ -122,8 +122,10 @@ def expand_expr(expr: Expr, state: Expansion) -> Expr:
             # `expand_toplevel` takes it. One here would otherwise register a
             # binder carrying the enclosing form's scopes.
             raise ExpandError(f"define outside the top level: {expr}")
-        case SList([Symbol() as head, *_]) if head.identifier == "if":
-            return expand_if(expr, state)
+        case SList([Symbol() as head, *_]) if head.identifier == "match":
+            return expand_match(expr, state)
+        case SList([Symbol() as head, *_]) if head.identifier == "forall":
+            return expand_forall(expr, state)
         case SList() if heads_ascribe(expr):
             # Ascription annotates a binder and is consumed at the binding
             # form that holds it, so one reaching expression position is
@@ -146,7 +148,7 @@ def expand_expr(expr: Expr, state: Expansion) -> Expr:
             # Any other list is an application; every child lives in the
             # enclosing region, whose scopes it already carries.
             return SList([expand_expr(item, state) for item in items])
-        case Integer() | Char() | Boolean() | Nil():
+        case Integer() | Char():
             return expr
         case _:
             raise ExpandError(f"not an expandable expression: {expr}")
@@ -222,6 +224,23 @@ def toplevel_binder(symbol: Expr, seen: set[str], state: Expansion) -> Symbol:
     # none of them could resolve the name.
     name: Symbol = checked(symbol, seen)
     bound = Symbol(name.identifier, set(name.scopes))
+    state.table.register(bound, state.phase)
+    return bound
+
+
+def opaque_binder(symbol: Expr, seen: set[str], state: Expansion) -> Symbol:
+    # A `forall`'s binder: the free variable it stands for. It mints no scope,
+    # as a `define` binder does not, and keeps none either — the scopes a
+    # written occurrence carries are the enclosing regions', and two
+    # occurrences of one opaque variable at two depths would become binders
+    # with incomparable scope sets, which `resolve` refuses as ambiguous
+    # rather than reading as the one variable they are meant to be.
+    #
+    # Minting the same symbol twice is the point and not a conflict:
+    # `BindingTable.register` answers the binding already registered for an
+    # equal symbol, so a second occurrence binds nothing new.
+    name: Symbol = checked(symbol, seen)
+    bound = Symbol(name.identifier)
     state.table.register(bound, state.phase)
     return bound
 
@@ -619,21 +638,117 @@ def transcribe(template: Expr, matches: dict[Symbol, Expr]) -> Expr:
             return template
 
 
-def expand_if(expr: SList, state: Expansion) -> Expr:
+def expand_match(expr: SList, state: Expansion) -> Expr:
     match expr.items:
-        case [Symbol() as head, test, consequent, alternative]:
+        case [Symbol() as head, scrutinee, *clauses] if clauses:
             pass
         case _:
-            raise ExpandError(f"malformed if: {expr}")
+            # A `match` with no clause included: it would be an expression with
+            # no value for every scrutinee, which is not something to expand.
+            raise ExpandError(f"malformed match: {expr}")
 
-    # Not a binding form: there is nothing for a new scope to bind, so all
-    # three subforms stay in the enclosing region unchanged.
+    # The scrutinee is an expression of the enclosing region and binds nothing,
+    # so it takes no scope of its own. Every clause does.
     return SList(
         [
             head,
-            expand_expr(test, state),
-            expand_expr(consequent, state),
-            expand_expr(alternative, state),
+            expand_expr(scrutinee, state),
+            *[expand_clause(clause, state) for clause in clauses],
+        ]
+    )
+
+
+def expand_clause(clause: Expr, state: Expansion) -> Expr:
+    match clause:
+        case SList([pattern, body]):
+            pass
+        case _:
+            raise ExpandError(f"malformed match clause: {clause}")
+
+    # One scope per clause, where every other binding form mints one for the
+    # whole of itself. A clause's pattern is its binding position and its body
+    # is the region those binders apply to, and two clauses are two regions:
+    # both may bind the one spelling, which `checked` refuses within a single
+    # `seen` set. So the set is per clause as well.
+    scope: Scope = state.fresh()
+    seen: set[str] = set()
+    body.add(scope)
+
+    return SList(
+        [
+            expand_pattern(pattern, scope, seen, state),
+            expand_expr(body, state),
+        ]
+    )
+
+
+def expand_pattern(
+    pattern: Expr, scope: Scope, seen: set[str], state: Expansion
+) -> Expr:
+    # A pattern, descended into for its binding positions alone — the role
+    # `type_form` plays for a written type. Whether the head of a constructor
+    # pattern names a constructor, and whether the operands are written at the
+    # arity its payload has, are later questions; this pass settles only where
+    # the binders are.
+    match pattern:
+        case SList([]):
+            # No constructor is spelled by nothing, and the empty combination
+            # is refused at expression position too.
+            raise ExpandError(f"not a pattern: {pattern}")
+        case SList([constructor, *operands]) if not heads_ascribe(pattern):
+            # The head is re-emitted exactly as it arrived, scopes and all, for
+            # the reason `binder_position` re-emits an `ascribe#` head: a
+            # macro-introduced constructor carries the scopes of wherever it was
+            # written, and resolution is what decides whether it names a
+            # constructor or a binding that merely shares the spelling.
+            return SList(
+                [
+                    constructor,
+                    *[
+                        expand_pattern(operand, scope, seen, state)
+                        for operand in operands
+                    ],
+                ]
+            )
+        case Integer() | Char():
+            # A literal matches by value and binds nothing.
+            return pattern
+        case _:
+            # A binder position: a bare symbol, or an `ascribe#` wrapping one.
+            # Scoped exactly as a lambda parameter is, which is what lets a
+            # pattern binder carry a written type.
+            return binder_position(
+                pattern,
+                lambda s: binder(s, scope, seen, state),
+                lambda t: expand_type(t, state),
+            )
+
+
+def expand_forall(expr: SList, state: Expansion) -> Expr:
+    match expr.items:
+        case [Symbol() as head, operand]:
+            pass
+        case _:
+            raise ExpandError(f"malformed forall: {expr}")
+
+    # Not a region-opening form, and not a region at all: the form is the
+    # binding position and the only occurrence of what it binds, so there is no
+    # body for a scope to apply to. Its binder is therefore free in the whole
+    # program, which is what `opaque_binder` mints.
+    if not heads_ascribe(operand):
+        # Refused here rather than at the binder position below, so a bare
+        # symbol reads as the missing ascription it is: a free variable has
+        # nowhere else to carry its type, because no enclosing form binds it.
+        raise ExpandError(f"forall takes an ascribed binder: {expr}")
+
+    return SList(
+        [
+            head,
+            binder_position(
+                operand,
+                lambda s: opaque_binder(s, set(), state),
+                lambda t: expand_type(t, state),
+            ),
         ]
     )
 

@@ -10,3 +10,5 @@
   - [X] (rev:5734ee9d945b12a9313f1dcfd87ce399dd54adf5) Make `ProdType` fields support anonymous fields (position based).
 - [ ] Register a built-in **macro** for `le`, `gt`, and `ge`. Since only `lt` and `eq` are supported to minimize the core language, `le`, `gt`, and `ge` will be implemented as macros that expand into equivalent expressions made up only of `and`, `or`, `lt`, and `eq`.
 - [ ] Implement `define-syntax`.
+- [ ] Add support for type inference.
+- [ ] Refactor the `if` core form with a `match` core form that matches on the patterns of sum types and produce types.

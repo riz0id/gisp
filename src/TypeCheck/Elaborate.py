@@ -1,10 +1,9 @@
 from Syntax import Expr, SList, Symbol
 from Syntax.Type import (
-    BoolType,
+    BOOL,
     CharType,
     FunType,
     IntType,
-    ListType,
     MuType,
     ProdType,
     Scheme,
@@ -13,6 +12,7 @@ from Syntax.Type import (
     VariadicStarType,
     VariadicType,
     VarType,
+    list_of,
 )
 
 __all__: list[str] = ["ElaborateError", "elaborate", "elaborate_type"]
@@ -102,7 +102,8 @@ def elaborate_type(expr: Expr) -> Type:
         case Symbol(identifier="@char"):
             return CharType()
         case Symbol(identifier="@bool"):
-            return BoolType()
+            # The spelling is the built-in; the sum is what it denotes.
+            return BOOL
         case Symbol() as symbol if symbol.identifier.startswith("@"):
             raise ElaborateError(f"not a type: {symbol}")
         case Symbol() as symbol:
@@ -111,7 +112,7 @@ def elaborate_type(expr: Expr) -> Type:
             # is what makes `substitute` and `unfold` meet.
             return VarType(symbol)
         case SList([Symbol() as head, element]) if head.identifier == "@list":
-            return ListType(elaborate_type(element))
+            return list_of(elaborate_type(element))
         case SList([Symbol() as head, argument]) if head.identifier == "@variadic":
             return VariadicType(elaborate_type(argument))
         case SList([Symbol() as head, argument]) if head.identifier == "@variadic*":

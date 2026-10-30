@@ -8,11 +8,10 @@ from Reader import read
 from Resolve import bindings
 from Syntax import Expr, Scope, SList, Symbol
 from Syntax.Type import (
-    BoolType,
+    BOOL,
     CharType,
     FunType,
     IntType,
-    ListType,
     MuType,
     ProdType,
     Scheme,
@@ -21,6 +20,7 @@ from Syntax.Type import (
     VariadicStarType,
     VariadicType,
     VarType,
+    list_of,
     unfold,
 )
 from TypeCheck.Elaborate import ElaborateError, elaborate, elaborate_type
@@ -67,12 +67,85 @@ def scheme_of(source: str) -> Scheme:
 def test_every_ground_type_is_written_as_a_bare_identifier():
     assert type_of("@int") == IntType()
     assert type_of("@char") == CharType()
-    assert type_of("@bool") == BoolType()
+    assert type_of("@bool") == BOOL
+
+
+def test_bool_denotes_a_sum_of_two_nullary_constructors():
+    # The spelling is the built-in and this is the type it means. `@bool` is
+    # not a sort of its own: it denotes a sum like any other, which is what
+    # lets `constructors` enumerate it and a `match` take a boolean apart.
+    assert BOOL == SumType({Symbol("#t"): ProdType(), Symbol("#f"): ProdType()})
+    assert type_of("@bool") == BOOL
+
+
+def test_bool_and_the_sum_written_out_are_one_type():
+    # Not merely equivalent — the same value, so every judgment over one is the
+    # judgment over the other.
+    assert type_of("(@sum (#t (@prod)) (#f (@prod)))") == type_of("@bool")
 
 
 def test_a_list_type_is_written_over_its_element():
-    assert type_of("(@list @int)") == ListType(IntType())
-    assert type_of("(@list (@list @char))") == ListType(ListType(CharType()))
+    assert type_of("(@list @int)") == list_of(IntType())
+    assert type_of("(@list (@list @char))") == list_of(list_of(CharType()))
+
+
+def test_a_list_denotes_a_recursive_sum_of_two_constructors():
+    # The point of the change. `(@list t)` is not a sort of its own: it is the
+    # `@mu` over a sum whose `cons` carries a record of the head and the rest,
+    # and whose `nil` carries the nullary product. Every reading of a list goes
+    # through the `MuType` and `SumType` arms because of this.
+    elaborated = type_of("(@list @int)")
+
+    match elaborated:
+        case MuType(variable=bound, body=SumType(cons=cons)):
+            pass
+        case _:
+            raise AssertionError(f"not a recursive sum: {elaborated}")
+
+    assert set(cons) == {Symbol("cons"), Symbol("nil")}
+    assert cons[Symbol("nil")] == ProdType()
+    assert cons[Symbol("cons")] == ProdType(
+        {Symbol("x"): IntType(), Symbol("xs"): VarType(bound)}
+    )
+
+
+def test_unfolding_a_list_leaves_its_tail_folded():
+    # What makes a `(cons x xs)` pattern bind `xs` at the list type as written:
+    # only the top node changes form, so the recursive position comes back as
+    # the folded type and no comparison ever meets an unfolding.
+    elaborated = type_of("(@list @int)")
+    unfolded = unfold(elaborated)
+
+    assert isinstance(unfolded, SumType)
+    assert unfolded.cons[Symbol("cons")] == ProdType(
+        {Symbol("x"): IntType(), Symbol("xs"): elaborated}
+    )
+
+
+def test_the_recursion_variable_is_one_no_program_can_bind():
+    # The binder has to be unwritable, because `substitute` renames nothing and
+    # the element type is routinely written over a variable a program chose:
+    # `(@list a)` inside a quantifier is exactly that. A binder a program could
+    # also write would capture the element on instantiation.
+    match type_of("(@list @int)"):
+        case MuType(variable=bound):
+            pass
+        case elaborated:
+            raise AssertionError(f"not a recursive type: {elaborated}")
+
+    assert bound == Symbol("")
+    assert not bound.scopes
+
+
+def test_a_hand_written_list_sum_is_a_type_of_its_own():
+    # The one place `(@list t)` differs from `@bool`, where the sum written out
+    # *is* the type. The recursion variable cannot be written, so a program's
+    # own list sum is a distinct type — read identically by every pattern, and
+    # not interchangeable with `(@list @int)`.
+    written = type_of("(@mu r (@sum (cons (@prod (x @int) (xs r))) (nil (@prod))))")
+
+    assert isinstance(written, MuType)
+    assert written != list_of(IntType())
 
 
 def test_the_nullary_product_is_written_with_no_fields():
@@ -80,13 +153,13 @@ def test_the_nullary_product_is_written_with_no_fields():
 
 
 def test_a_positional_product_keeps_its_fields_in_order():
-    assert type_of("(@prod @int @bool)") == ProdType([IntType(), BoolType()])
+    assert type_of("(@prod @int @bool)") == ProdType([IntType(), BOOL])
 
 
 def test_a_named_product_is_a_record_of_bare_names():
     record = type_of("(@prod (head @int) (tail @bool))")
 
-    assert record == ProdType({Symbol("head"): IntType(), Symbol("tail"): BoolType()})
+    assert record == ProdType({Symbol("head"): IntType(), Symbol("tail"): BOOL})
     assert isinstance(record, ProdType)
     assert record.names() == (Symbol("head"), Symbol("tail"))
 
@@ -94,7 +167,7 @@ def test_a_named_product_is_a_record_of_bare_names():
 def test_a_field_written_as_a_type_form_stays_positional():
     # The disambiguation: `(@list @int)` is a type and not a field named
     # `@list`, which the leading `@` tells apart.
-    assert type_of("(@prod (@list @int))") == ProdType([ListType(IntType())])
+    assert type_of("(@prod (@list @int))") == ProdType([list_of(IntType())])
 
 
 def test_a_sum_is_written_as_its_constructors():
@@ -111,9 +184,9 @@ def test_the_variadic_runs_are_written_over_one_type():
 
 def test_a_function_type_is_written_run_then_return():
     assert type_of("(@fun (@prod @int @int) @bool)") == FunType(
-        return_type=BoolType(), argument_type=ProdType([IntType(), IntType()])
+        return_type=BOOL, argument_type=ProdType([IntType(), IntType()])
     )
-    assert type_of("(@fun (@prod) @bool)") == FunType(return_type=BoolType())
+    assert type_of("(@fun (@prod) @bool)") == FunType(return_type=BOOL)
     assert type_of("(@fun (@prod (n @int)) @int)") == FunType(
         return_type=IntType(), argument_type=ProdType({Symbol("n"): IntType()})
     )
@@ -178,7 +251,7 @@ def test_an_elaborated_recursive_type_unfolds():
     elaborated = type_of("(@mu a (@list a))")
 
     assert isinstance(elaborated, MuType)
-    assert unfold(elaborated) == ListType(elaborated)
+    assert unfold(elaborated) == list_of(elaborated)
 
 
 def test_a_nested_recursive_type_binds_a_distinct_variable():
@@ -221,7 +294,7 @@ def test_a_type_written_without_a_quantifier_is_a_trivial_scheme():
     # Every ascription reads as a scheme, so the monomorphic ones have to read
     # as the scheme that quantifies nothing rather than being a separate shape.
     assert scheme_of("@int") == Scheme(variables=(), body=IntType())
-    assert scheme_of("(@list @int)") == Scheme(variables=(), body=ListType(IntType()))
+    assert scheme_of("(@list @int)") == Scheme(variables=(), body=list_of(IntType()))
     assert scheme_of("@int").monomorphic()
 
 
@@ -285,13 +358,17 @@ def test_a_mu_within_a_quantifier_binds_its_own_variable():
             raise AssertionError(f"not one quantified variable: {variables}")
 
     match scheme.body:
-        case MuType(variable=bound, body=ListType(element=element)):
+        case MuType(variable=bound, body=MuType()):
+            # A `@mu` whose body is another: `(@list a)` is itself the `@mu`
+            # over a sum, so a `@mu` written over a list type nests.
             pass
         case body:
             raise AssertionError(f"not a recursive list: {body}")
 
     assert quantified != bound
-    assert element == VarType(bound)
+    # The element is the inner `@mu`'s own binder and not the quantifier's,
+    # which is the whole of what this test is about.
+    assert scheme.body == MuType(bound, list_of(VarType(bound)))
 
 
 # -- rank-1 ----------------------------------------------------------------------

@@ -5,19 +5,46 @@ from Expander import ExpandError, ParseError
 from Expander import expand as expand_syntax
 from Expander import parse as parse_syntax
 from Resolve import Ambiguous, bindings
-from Syntax import Boolean, Expr, Integer, SList, Value
+from Syntax import (
+    Expr,
+    Integer,
+    SumConExpr,
+    Value,
+    as_data,
+    as_syntax,
+    boolean as boolean_value,
+    consed,
+    elements,
+    listed,
+    product as product_value,
+    spread,
+    unit,
+)
 from Syntax.Value import Primitive
 
 __all__: list[str] = ["BUILTINS"]
 
 
+def cell(value: Value) -> tuple[Expr, Expr] | None:
+    # The head and the rest a cons cell carries, or `None` where the value is
+    # not a cell. The empty list is not one, which is what the selectors below
+    # refuse.
+    match value:
+        case SumConExpr(constructor=con, payload=payload) if con.identifier == "cons":
+            match spread(payload):
+                case [first, rest]:
+                    return (first, rest)
+
+    return None
+
+
 def head(arguments: list[Value]) -> Value:
     [value] = arguments
 
-    match value:
-        case SList([first, *_]):
+    match cell(value):
+        case (first, _):
             return first
-        case SList([]):
+        case _ if elements(value) == []:
             raise EvalError("head: empty list")
         case _:
             raise EvalError(f"head: not a list: {value}")
@@ -26,25 +53,36 @@ def head(arguments: list[Value]) -> Value:
 def tail(arguments: list[Value]) -> Value:
     [value] = arguments
 
-    match value:
-        case SList([_, *rest]):
-            return SList(rest)
-        case SList([]):
+    match cell(value):
+        case (_, rest):
+            return rest
+        case _ if elements(value) == []:
             raise EvalError("tail: empty list")
         case _:
             raise EvalError(f"tail: not a list: {value}")
 
 
 def cons(arguments: list[Value]) -> Value:
-    [value, rest] = arguments
+    [payload] = arguments
 
-    match value, rest:
-        case (Expr() as datum, SList(items)):
-            return SList([datum, *items])
-        case (Expr(), _):
-            raise EvalError(f".: not a list: {rest}")
-        case _:
-            raise EvalError(f".: a procedure cannot be list data: {value}")
+    match payload:
+        case Expr() as fields:
+            match spread(fields):
+                case [first, rest] if elements(rest) is not None:
+                    return consed(first, rest)
+                case [_, rest]:
+                    raise EvalError(f"cons: not a list: {rest}")
+
+    raise EvalError(f"cons: not a cons cell's payload: {payload}")
+
+
+def nil(arguments: list[Value]) -> Value:
+    [payload] = arguments
+
+    if payload == unit():
+        return listed([])
+
+    raise EvalError(f"nil: not the empty product: {payload}")
 
 
 def le(arguments: list[Value]) -> Value:
@@ -52,7 +90,7 @@ def le(arguments: list[Value]) -> Value:
 
     match value, other:
         case (Integer(a), Integer(b)):
-            return Boolean(a <= b)
+            return boolean_value(a <= b)
         case (Integer(), _):
             raise EvalError(f"le: not an integer: {other}")
         case _:
@@ -64,7 +102,7 @@ def lt(arguments: list[Value]) -> Value:
 
     match value, other:
         case (Integer(a), Integer(b)):
-            return Boolean(a < b)
+            return boolean_value(a < b)
         case (Integer(), _):
             raise EvalError(f"lt: not an integer: {other}")
         case _:
@@ -128,7 +166,7 @@ def eq(arguments: list[Value]) -> Value:
 
     match value, other:
         case (Expr(), Expr()):
-            return Boolean(value == other)
+            return boolean_value(value == other)
         case (Expr(), _):
             raise EvalError(f"eq: a procedure cannot be compared: {other}")
         case _:
@@ -139,10 +177,37 @@ def length(arguments: list[Value]) -> Value:
     [value] = arguments
 
     match value:
-        case SList(items):
+        case Expr() as datum if (items := elements(datum)) is not None:
             return Integer(len(items))
         case _:
             raise EvalError(f"len: not a list: {value}")
+
+
+def boolean(name: str, which: bool) -> Primitive:
+    def operate(arguments: list[Value]) -> Value:
+        [payload] = arguments
+
+        if payload == unit():
+            return boolean_value(which)
+
+        raise EvalError(f"{name}: not the empty product: {payload}")
+
+    return Primitive(name, 1, operate)
+
+
+def product(arguments: list[Value]) -> Value:
+    fields: list[Expr] = []
+
+    for value in arguments:
+        match value:
+            case Expr() as datum:
+                fields.append(datum)
+            case _:
+                raise EvalError(
+                    f"prod#: a procedure cannot be a product's field: {value}"
+                )
+
+    return product_value(fields)
 
 
 def expand_program(arguments: list[Value]) -> Value:
@@ -151,7 +216,7 @@ def expand_program(arguments: list[Value]) -> Value:
     match value:
         case Expr() as program:
             try:
-                return expand_syntax(program)
+                return as_data(expand_syntax(as_syntax(program)))
             except ExpandError as error:
                 raise EvalError(f"expand: {error}") from error
         case _:
@@ -163,8 +228,10 @@ def parse_program(arguments: list[Value]) -> Value:
 
     match value:
         case Expr() as program:
+            syntax: Expr = as_syntax(program)
+
             try:
-                return parse_syntax(program, bindings(program))
+                return as_data(parse_syntax(syntax, bindings(syntax)))
             except (Ambiguous, ParseError) as error:
                 raise EvalError(f"parse: {error}") from error
         case _:
@@ -172,9 +239,13 @@ def parse_program(arguments: list[Value]) -> Value:
 
 
 BUILTINS: Final[dict[str, Value]] = {
+    "#t": boolean("#t", True),
+    "#f": boolean("#f", False),
+    "nil": Primitive("nil", 1, nil),
+    "cons": Primitive("cons", 1, cons),
+    "prod#": Primitive("prod#", None, product),
     "head": Primitive("head", 1, head),
     "tail": Primitive("tail", 1, tail),
-    ".": Primitive(".", 2, cons),
     "le": Primitive("le", 2, le),
     "lt": Primitive("lt", 2, lt),
     "+": Primitive("+", 2, add),

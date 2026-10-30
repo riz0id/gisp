@@ -2,7 +2,6 @@ import io
 from pathlib import Path
 
 import pytest
-
 from gisp.__main__ import main
 
 LIB: Path = Path(__file__).parent.parent / "lib"
@@ -25,7 +24,7 @@ def test_a_fully_ascribed_library_checks_and_runs(capsys, name):
 
 
 def test_a_declaration_its_initializer_does_not_inhabit_is_refused(capsys):
-    assert main(["-e", "(define (ascribe# n @int) #t)"]) == 1
+    assert main(["-e", "(define (ascribe# n @int) (#t (prod#)))"]) == 1
     assert "gisp:" in capsys.readouterr().err
 
 
@@ -36,7 +35,7 @@ def test_an_unascribed_declaration_is_refused(capsys):
 
 
 def test_a_misapplied_builtin_is_refused(capsys):
-    assert main(["-e", "(le #t 1)"]) == 1
+    assert main(["-e", "(le (#t (prod#)) 1)"]) == 1
     assert "gisp:" in capsys.readouterr().err
 
 
@@ -88,10 +87,7 @@ def test_a_later_form_applies_an_earlier_declaration(capsys):
 
 
 def test_a_declaration_is_refused_a_second_time_at_another_type(capsys):
-    source = (
-        "(define (ascribe# n @int) 5)"
-        " (define (ascribe# n @bool) #t)"
-    )
+    source = "(define (ascribe# n @int) 5) (define (ascribe# n @bool) (#t (prod#)))"
 
     assert main(["-e", source]) == 1
     assert "gisp:" in capsys.readouterr().err
@@ -122,7 +118,7 @@ def test_the_repl_carries_a_declaration_across_lines(monkeypatch, capsys):
 
 
 def test_the_repl_continues_past_a_line_that_does_not_check(monkeypatch, capsys):
-    lines = "(le #t 1)\n(+ 1 2)\n"
+    lines = "(le (#t (prod#)) 1)\n(+ 1 2)\n"
 
     assert repl(monkeypatch, lines) == 0
 

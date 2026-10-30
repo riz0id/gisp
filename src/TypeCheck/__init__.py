@@ -1,15 +1,23 @@
 from dataclasses import dataclass, field, replace
 
 from Resolve import BindingTable
-from Syntax import Char, Expr, Integer, SList, Symbol, ascription, binder_name
+from Syntax import (
+    Char,
+    Expr,
+    Integer,
+    SList,
+    Symbol,
+    ascription,
+    binder_name,
+)
 from Syntax.Type import (
-    BoolType,
+    CONS,
+    NIL,
     CharType,
     ConstructorArity,
     Context,
     FunType,
     IntType,
-    ListType,
     MuType,
     ProdType,
     Scheme,
@@ -18,13 +26,17 @@ from Syntax.Type import (
     VariadicStarType,
     VariadicType,
     constructor_arity,
+    constructors,
     is_constructor,
+    is_nullary_type,
+    list_of,
     meaning,
     solve,
     substitute,
     unfold,
 )
 from TypeCheck.Elaborate import ElaborateError, elaborate
+from TypeCheck.Patterns import exhaustive, payload_fields
 
 __all__: list[str] = [
     "ElaborateError",
@@ -75,9 +87,10 @@ class TypeChecker:
                 if not is_constructor(ty, expr, self.store, self.table):
                     raise TypeCheckError(f"{expr} does not construct {ty}.")
             case Symbol() as symbol:
-                # A reference inhabits exactly its ascription. This subsumes
-                # `#t` and `#f` against `@bool`, which `Context.default()`
-                # ascribes.
+                # A reference inhabits exactly its ascription, and nothing
+                # here constructs: a constructor is a head, so `#t`, `nil`,
+                # and `cons` are refused as the unascribed references they are
+                # when one is written on its own.
                 binder: Symbol = meaning(symbol, self.table)
 
                 if binder in self.store.schemes:
@@ -98,14 +111,10 @@ class TypeChecker:
                 head.identifier == "lambda"
             ):
                 self.abstraction(parameters, body, ty)
-            case SList([Symbol() as head, test, consequent, alternative]) if (
-                head.identifier == "if"
+            case SList([Symbol() as head, scrutinee, *clauses]) if (
+                head.identifier == "match"
             ):
-                # Only the test is constrained on its own; both branches must
-                # inhabit the checked type.
-                self.check(test, BoolType())
-                self.check(consequent, ty)
-                self.check(alternative, ty)
+                self.matching(scrutinee, clauses, ty)
             case SList([Symbol() as head, SList(pairs), body]) if (
                 head.identifier == "letrec"
             ):
@@ -114,6 +123,8 @@ class TypeChecker:
                 self.check(body, ty)
             case SList([Symbol() as head, datum]) if head.identifier == "quote":
                 self.quotation(datum, ty)
+            case SList([Symbol() as head, _]) if head.identifier == "forall":
+                self.opaque(expr, ty)
             case SList([Symbol() as head, *_]) if head.identifier == "define":
                 # A declaration, not an expression: only `declaration` gives
                 # it a meaning. Refused here so it cannot fall into the
@@ -126,10 +137,9 @@ class TypeChecker:
                 else:
                     self.application(head, operands, ty)
             case _:
-                # Everything else: empty combinations, applications of
-                # non-symbol heads (check-only cannot invent a function type
-                # for them), and the programmatic `Boolean`/`Nil` nodes no
-                # source text reaches.
+                # Everything else: empty combinations, and applications of
+                # non-symbol heads, for which check-only cannot invent a
+                # function type.
                 raise TypeCheckError(f"not a checkable expression: {expr}")
 
     def abstraction(self, parameters: list[Expr], body: Expr, ty: Type) -> None:
@@ -196,6 +206,171 @@ class TypeChecker:
             case _:
                 raise TypeCheckError(f"a lambda does not inhabit {ty}.")
 
+    def matching(self, scrutinee: Expr, clauses: list[Expr], ty: Type) -> None:
+        # A `match`: every clause's pattern takes the scrutinee apart and every
+        # clause's body inhabits the checked type. The second half is what an
+        # `if`'s two branches did; the first is what generalizes it, with the
+        # test's `@bool` widened to whatever the scrutinee's own type is.
+        #
+        # The scrutinee's type is read here and not handed down. `ty` is what
+        # the whole form inhabits and fixes nothing about what is being taken
+        # apart, so this is the one place `check` consults `type_of` — the same
+        # reading `solved` makes of an operand, except that an unreadable one
+        # is refused rather than passed over: a pattern has nothing to be
+        # checked against without it.
+        scrutinee_type: Type = self.type_of(scrutinee)
+
+        # Read, and then checked at what was read, which is what
+        # `check_toplevel` does with a top-level form. Reading alone would not
+        # do: `type_of` answers an application's return type without looking at
+        # its operands, and the `if` this arm replaces constrained its test
+        # against `@bool` rather than reading it — so `(le #t #t)` has to be
+        # refused here or it is refused nowhere.
+        self.check(scrutinee, scrutinee_type)
+
+        rows: list[list[Expr]] = []
+
+        for clause in clauses:
+            match clause:
+                case SList([pattern, body]):
+                    pass
+                case _:
+                    # `parse` refuses every other shape.
+                    raise TypeCheckError(f"not a match clause: {clause}")
+
+            self.pattern(pattern, scrutinee_type)
+            self.check(body, ty)
+            rows.append([pattern])
+
+        if not exhaustive(rows, [scrutinee_type], self.store, self.table):
+            # Said as the type it is about, because that is what names the
+            # constructors a clause is missing: the form is total or it is not
+            # an expression, and a `match` falling off its last clause would
+            # have no value to answer with.
+            raise TypeCheckError(
+                f"a match on {scrutinee_type} leaves values unmatched."
+            )
+
+    def pattern(self, pattern: Expr, ty: Type) -> None:
+        # One pattern, checked against the type of the value it takes apart,
+        # with every binder it binds registered. The counterpart of
+        # `construction`: that reads a head and its operands as building a
+        # value of `ty`, and this reads them as taking one apart.
+        if (declared := ascription(pattern)) is not None:
+            binder, written = declared
+            ascribed: Scheme = self.scheme_of(written)
+
+            if not ascribed.monomorphic():
+                # The refusal `abstraction` makes at a parameter: the position
+                # fixes the one type the binder is used at, so a quantifier
+                # over it would bind variables no use could instantiate.
+                raise TypeCheckError(
+                    f"{binder} is bound by a pattern, and cannot be ascribed"
+                    f" the polymorphic {written}."
+                )
+
+            if ascribed.body != ty:
+                raise TypeCheckError(f"{binder} is ascribed {ascribed.body}, not {ty}.")
+
+            self.ascribe(binder, Scheme(variables=(), body=ty))
+            return
+
+        match pattern:
+            case Symbol() as binder:
+                # An irrefutable pattern: it matches every value, and names it.
+                # Post-parse binders are globally distinct symbols, so
+                # registering into the one mutable store is sound.
+                self.ascribe(binder, Scheme(variables=(), body=ty))
+            case Integer() | Char():
+                # A literal matches one value and binds nothing, so the whole
+                # of the judgment is that the literal inhabits the type.
+                if not is_constructor(ty, pattern, self.store, self.table):
+                    raise TypeCheckError(f"the literal {pattern} does not match {ty}.")
+            case SList([Symbol() as head, *operands]):
+                self.destructuring(head, operands, ty)
+            case _:
+                raise TypeCheckError(f"not a pattern: {pattern}")
+
+    def destructuring(self, head: Symbol, operands: list[Expr], ty: Type) -> None:
+        # A constructor pattern: the head names one of `ty`'s constructors and
+        # the operands are patterns over its payload.
+        cons: dict[Symbol, Type] | None = constructors(ty, self.store)
+
+        if cons is None:
+            # `@int` and `@char` have a constructor per value and so cannot be
+            # named; a procedure is built by `lambda` and taken apart by
+            # nothing; and the variadic types classify no values at all.
+            raise TypeCheckError(f"{ty} has no constructors a pattern may name.")
+
+        named: Symbol = meaning(head, self.table)
+
+        if named not in cons:
+            # Resolution decides this and the identifier does not, which is
+            # what makes a program with a binder of its own for `cons` have a
+            # `cons` that constructs nothing — the reading `is_constructor`
+            # already makes of a construction's head.
+            raise TypeCheckError(f"{head} does not construct {ty}.")
+
+        fields: list[Type] = payload_fields(cons[named])
+
+        if len(operands) != len(fields):
+            raise TypeCheckError(
+                f"{head} takes {len(fields)} patterns, not {len(operands)}."
+            )
+
+        for operand, field_type in zip(operands, fields, strict=True):
+            self.pattern(operand, field_type)
+
+    def opaque(self, form: Expr, ty: Type | None = None) -> Type:
+        # A `(forall (ascribe# x t))`: the free variable `x`, standing for any
+        # value of `t`. The form is the binding position and the occurrence at
+        # once, so the ascription is registered on sight — there is no
+        # enclosing binder position to have carried it — and a second
+        # occurrence registers the same type again, which `Context.register`
+        # admits while refusing a second occurrence that disagrees.
+        #
+        # The type is read here and not taken from `ty`, as a parameter's is
+        # taken from the function type: nothing fixes a free variable's type
+        # from outside, which is why one has to be written at all.
+        match form:
+            case SList([Symbol(), operand]) if (
+                declared := ascription(operand)
+            ) is not None:
+                binder, written = declared
+            case _:
+                # `parse` refuses every other shape.
+                raise TypeCheckError(f"not a free variable: {form}")
+
+        scheme: Scheme = self.scheme_of(written)
+
+        if not scheme.monomorphic():
+            # The refusal `abstraction` makes at a parameter: the variable
+            # stands for values of the one type it is written at, so a
+            # quantifier over it would bind variables no occurrence
+            # instantiates.
+            raise TypeCheckError(
+                f"{binder} is a free variable, and cannot be ascribed the"
+                f" polymorphic {written}."
+            )
+
+        if not is_nullary_type(scheme.body, self.store):
+            # Only a ground type's values are a range the analysis can take a
+            # variable over: a free variable of a list type would stand for
+            # data of no bounded shape, one of a function type for an
+            # arbitrary procedure, and neither is a set of values to quantify
+            # across.
+            raise TypeCheckError(
+                f"{binder} ranges over {scheme.body}, and only a ground type"
+                f" has values a free variable may be taken over."
+            )
+
+        self.ascribe(binder, scheme)
+
+        if ty is not None and scheme.body != ty:
+            raise TypeCheckError(f"{binder} ranges over {scheme.body}, not {ty}.")
+
+        return scheme.body
+
     def quotation(self, datum: Expr, ty: Type) -> None:
         # A quoted datum, checked against the type it is written at. Quotation
         # is the one runtime constructor of list and symbol data, so this is the
@@ -205,22 +380,34 @@ class TypeChecker:
         #
         # Where this overlaps `is_constructor` the two agree — an `Integer`
         # constructs `@int` and a `Char` constructs `@char` — and it extends
-        # that to the one shape no expression has, a list written as data rather
-        # than applied to `list`.
+        # that to the one shape no expression has, a list written as data
+        # rather than built from `nil` and `cons`.
         match ty:
             case MuType() as recursive:
                 # Taken apart as its unfolding, as in `construction`: the
                 # recursive positions come back as the folded type, so a datum
                 # nested within one is read at the type it was written at.
                 self.quotation(datum, unfold(recursive))
-            case ListType(element=element):
-                match datum:
-                    case SList(items):
-                        # The empty list inhabits every list type: it is the
-                        # one datum that constructs a list without naming its
-                        # element type.
-                        for item in items:
-                            self.quotation(item, element)
+            case SumType(cons=cons) if {NIL, CONS} <= cons.keys():
+                # A quoted list, read as the sum `(@list t)` denotes. `SList`
+                # is the one shape no expression has, so this is where the
+                # runtime representation of list data is said to inhabit a type
+                # at all — the reading `Analysis.GROUNDS` makes of a boolean,
+                # whose constructor is what tells it from a list.
+                #
+                # Read through the payloads rather than against
+                # `list_of(element)`: the two agree for every list type, and
+                # the payloads are what name the types the element and the rest
+                # are checked at. The empty list inhabits every list type — it
+                # is the one datum that constructs a list without naming its
+                # element type — and a longer one is read a cell at a time, as
+                # a `(cons x xs)` pattern takes one apart.
+                match datum, payload_fields(cons[NIL]), payload_fields(cons[CONS]):
+                    case (SList([]), [], _):
+                        pass
+                    case (SList([first, *rest]), _, [element, remaining]):
+                        self.quotation(first, element)
+                        self.quotation(SList(rest), remaining)
                     case _:
                         raise TypeCheckError(f"quoted {datum} does not construct {ty}.")
             case IntType() if isinstance(datum, Integer):
@@ -244,7 +431,7 @@ class TypeChecker:
             case Char():
                 return CharType()
             case SList([first, *_]):
-                return ListType(self.quoted(first))
+                return list_of(self.quoted(first))
             case _:
                 # The empty list and a symbol, neither of which names a type:
                 # the empty list is written at every list type and determines
@@ -280,12 +467,29 @@ class TypeChecker:
                 return self.store[binder]
             case SList([Symbol() as head, datum]) if head.identifier == "quote":
                 return self.quoted(datum)
-            case SList([Symbol() as head, test, consequent, _]) if (
-                head.identifier == "if"
-            ):
-                self.check(test, BoolType())
+            case SList([Symbol() as head, _]) if head.identifier == "forall":
+                # The type written at the binder, which is what lets the form
+                # stand at the top level and in an operand position that
+                # determines a scheme's instance.
+                return self.opaque(expr)
+            case SList([Symbol() as head, scrutinee, *clauses]) if (
+                head.identifier == "match"
+            ) and clauses:
+                match clauses[0]:
+                    case SList([pattern, body]):
+                        pass
+                    case _:
+                        raise TypeCheckError(f"not a match clause: {clauses[0]}")
 
-                return self.type_of(consequent)
+                # The first clause's body, as the `if` arm answered with its
+                # consequent. Its pattern's binders have to reach the store
+                # before the body can be read, exactly as a letrec's pairs do
+                # below — a body may well be a reference to what the pattern
+                # bound. `Context.register` is idempotent at an equal type, so
+                # the `check` that follows registers them again harmlessly.
+                self.pattern(pattern, self.type_of(scrutinee))
+
+                return self.type_of(body)
             case SList([Symbol() as head, SList(pairs), body]) if (
                 head.identifier == "letrec"
             ):
@@ -421,9 +625,6 @@ class TypeChecker:
                 # operands below are checked against types in the form they
                 # were written, and no comparison ever meets an unfolding.
                 self.construction(head, operands, unfold(recursive))
-            case ListType(element=element):
-                for operand in operands:
-                    self.check(operand, element)
             case ProdType() as product:
                 for operand, field_type in zip(operands, product.types(), strict=True):
                     self.check(operand, field_type)

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Final, Self, override
 
 from Resolve import BindingTable, Unbound, resolve
-from Syntax import Boolean, Char, Expr, Integer, Nil, SList, Symbol
+from Syntax import Char, Expr, Integer, SList, Symbol, binder_name
 
 __all__: list[str] = [
     "CExpr",
@@ -13,8 +13,6 @@ __all__: list[str] = [
     "LitCExpr",
     "IntegerCExpr",
     "CharCExpr",
-    "BooleanCExpr",
-    "NilCExpr",
     "ListCExpr",
     "ConjunctionCExpr",
     "DisjunctionCExpr",
@@ -79,26 +77,6 @@ class CharCExpr(LitCExpr):
     @override
     def to_expr(self: Self) -> Expr:
         return self.value
-
-
-# 'BooleanCExpr(b)' corresponds to a literal boolean value.
-@dataclass()
-class BooleanCExpr(LitCExpr):
-    value: Boolean
-
-    @override
-    def to_expr(self: Self) -> Expr:
-        return self.value
-
-
-# 'NilCExpr()' corresponds to a literal nil value.
-@dataclass()
-class NilCExpr(LitCExpr):
-    # Nil carries no payload, so the datum is reconstructed rather than
-    # stored: every `Nil` compares equal to every other.
-    @override
-    def to_expr(self: Self) -> Expr:
-        return Nil()
 
 
 # 'AppCExpr(f, a, b, ...)' corresponds to the S-expression '(f a b ...)'.
@@ -194,9 +172,6 @@ class EquivalenceCExpr(CExpr):
         )
 
 
-# The built-in operators that have a condition constructor of their own, each
-# paired with the constructor its form builds and split by arity. A head that
-# resolves to anything else spells an ordinary application.
 OPERATORS: Final[dict[str, Callable[[CExpr, CExpr], CExpr]]] = {
     "and": ConjunctionCExpr,
     "or": DisjunctionCExpr,
@@ -212,10 +187,6 @@ UNARY_OPERATORS: Final[dict[str, Callable[[CExpr], CExpr]]] = {
 def constructor[T](
     head: Symbol, store: BindingTable, operators: dict[str, T]
 ) -> T | None:
-    # Which condition constructor a head names, or `None` when the head is an
-    # ordinary operator. Resolution decides this and spelling does not: a
-    # program with a binder of its own for `and` has an `and` that is not the
-    # built-in one, and the condition must read it as the application it is.
     try:
         binder: Symbol = resolve(head, store).binder
 
@@ -236,13 +207,11 @@ def convert(expr: Expr, store: BindingTable) -> CExpr:
             return IntegerCExpr(value)
         case Char() as value:
             return CharCExpr(value)
-        case Boolean() as value:
-            return BooleanCExpr(value)
-        case Nil():
-            return NilCExpr()
+        case SList([Symbol() as head, operand]) if (head.identifier == "forall") and (
+            bound := binder_name(operand)
+        ) is not None:
+            return VarCExpr(bound)
         case SList([Symbol() as head, operand]):
-            # A two-item list can only be the unary built-in: `(not a b)` is an
-            # application of `not`, whatever `not` resolves to.
             build_unary: Callable[[CExpr], CExpr] | None = constructor(
                 head, store, UNARY_OPERATORS
             )
@@ -252,9 +221,6 @@ def convert(expr: Expr, store: BindingTable) -> CExpr:
             else:
                 return build_unary(convert(operand, store))
         case SList([Symbol() as head, left, right]):
-            # The binary built-in forms need exactly a three-item list:
-            # `(and a b c)` is an application of `and`, whatever `and`
-            # resolves to.
             build: Callable[[CExpr, CExpr], CExpr] | None = constructor(
                 head, store, OPERATORS
             )
@@ -264,14 +230,6 @@ def convert(expr: Expr, store: BindingTable) -> CExpr:
             else:
                 return build(convert(left, store), convert(right, store))
         case SList(items):
-            # The empty combination is not refused: `parse` has already done
-            # that, and this conversion is total on the data it represents.
             return ListCExpr(items)
         case _:
-            # Any sort the condition language does not represent, `Keyword`
-            # being the first: a keyword names an argument position and states
-            # no condition. The arm is also what a checker needs, since
-            # exhaustiveness over an ABC is not something it can see, and
-            # falling through would return `None` from a function annotated
-            # `CExpr`.
             raise CExprError(f"not a convertible expression: {expr}")

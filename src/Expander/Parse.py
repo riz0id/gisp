@@ -1,10 +1,8 @@
 from Resolve import BindingTable, Phase, Unbound, resolve
 from Syntax import (
-    Boolean,
     Char,
     Expr,
     Integer,
-    Nil,
     SList,
     Symbol,
     ascription,
@@ -51,14 +49,6 @@ def reference(
 def binder_position(
     parameter: Expr, table: BindingTable, phase: Phase | None = None
 ) -> Expr:
-    # The post-expansion shape of a binder position: a bare symbol, or an
-    # `ascribe#` wrapper whose name is one. The wrapper is kept, because the
-    # ascription is what the type checker reads the binder's type off of.
-    #
-    # The keyword is re-emitted with an empty scope set, as `parse` rebuilds
-    # `lambda`: it names no value and resolves against nothing. The type operand
-    # is read as a type — checked for its written form and resolved against the
-    # same table every other identifier is.
     match parameter:
         case SList([head, *_]) if (ascribed := ascription(parameter)) is not None:
             name, ty = ascribed
@@ -77,13 +67,49 @@ def binder_position(
             raise ParseError(f"binder is not a symbol: {parameter}")
 
 
+def pattern_syntax(
+    pattern: Expr, table: BindingTable, phase: Phase | None = None
+) -> Expr:
+    match pattern:
+        case SList([]):
+            raise ParseError(f"not a pattern: {pattern}")
+        case SList([constructor, *operands]) if not heads_ascribe(pattern):
+            match constructor:
+                case Symbol() as head:
+                    pass
+                case _:
+                    raise ParseError(f"pattern head is not a constructor: {pattern}")
+
+            return SList(
+                [
+                    reference(head, table, phase),
+                    *[pattern_syntax(operand, table, phase) for operand in operands],
+                ]
+            )
+        case Integer() | Char():
+            return pattern
+        case _:
+            return binder_position(pattern, table, phase)
+
+
+def pattern_clause(
+    clause: Expr, table: BindingTable, phase: Phase | None = None
+) -> Expr:
+    match clause:
+        case SList([pattern, body]):
+            return SList(
+                [
+                    pattern_syntax(pattern, table, phase),
+                    parse(body, table, phase),
+                ]
+            )
+        case _:
+            raise ParseError(f"malformed match clause: {clause}")
+
+
 def type_variable(
     symbol: Symbol, table: BindingTable, phase: Phase | None = None
 ) -> Symbol:
-    # A type variable occurrence, resolved to its binder exactly as `reference`
-    # resolves a term occurrence — except that an unresolved one is refused
-    # rather than read as itself. A term identifier the table does not bind is
-    # a builtin's; a type identifier nothing binds stands for no type.
     try:
         return resolve(symbol, table, phase).binder
     except Unbound:
@@ -91,10 +117,6 @@ def type_variable(
 
 
 def names_a_type(field: Expr) -> bool:
-    # Whether a product's field or a sum's constructor is written as a
-    # `(name type)` pair rather than as a type on its own. The two are told
-    # apart by the head: every type constructor's identifier begins with `@`, so
-    # a list headed by anything else names what follows it.
     match field:
         case SList([Symbol() as name, _]):
             return not name.identifier.startswith("@")
@@ -105,10 +127,6 @@ def names_a_type(field: Expr) -> bool:
 def named_types(
     pairs: list[Expr], table: BindingTable, phase: Phase | None = None
 ) -> list[Expr]:
-    # Every `(name type)` pair, which is the shape a record's fields and a sum's
-    # constructors share. A name is neither a binder nor an occurrence — it
-    # labels a position — so it is re-emitted with an empty scope set, as a core
-    # form's identifier is.
     seen: set[str] = set()
     named: list[Expr] = []
 
@@ -122,8 +140,6 @@ def named_types(
                 raise ParseError(f"not a named type: {pair}")
 
         if written.identifier in seen:
-            # Refused rather than collapsed: one of the two would be left with
-            # no position, and which one would depend on the reading order.
             raise ParseError(f"duplicate name in one type: {written}")
 
         seen.add(written.identifier)
@@ -135,9 +151,6 @@ def named_types(
 def product_fields(
     fields: list[Expr], table: BindingTable, phase: Phase | None = None
 ) -> list[Expr]:
-    # `(@prod t ...)` is a tuple and `(@prod (x t) ...)` a record. A product is
-    # one shape or the other throughout: `ProdType` keeps names for a record
-    # only, so a mixed one has no reading that keeps every field.
     match fields:
         case []:
             return []
@@ -156,19 +169,6 @@ def product_fields(
 
 
 def type_syntax(expr: Expr, table: BindingTable, phase: Phase | None = None) -> Expr:
-    # A written type, checked for its written form and resolved against the one
-    # binding table. The result is still syntax: this phase builds no `Type`,
-    # because what a type denotes is not a question about how it is written.
-    #
-    # The two sorts of identifier are read as `parse` reads the two sorts in a
-    # term. An identifier beginning with `@` is a type constructor's and is
-    # re-emitted with an empty scope set, as a core form's is. Any other
-    # identifier is a variable and resolves to its binder, as a reference does.
-    #
-    # Not read here: the rank-1 restriction, so a `forall#` written inside a
-    # type resolves and is emitted; whether a `@fun`'s first operand denotes an
-    # argument run; and whether a `@mu` is guarded. Each is about meaning, and
-    # each belongs to the phase that builds the `Type`.
     match expr:
         case Symbol(identifier="@int" | "@char" | "@bool") as symbol:
             return Symbol(symbol.identifier)
@@ -267,7 +267,7 @@ def parse(expr: Expr, table: BindingTable, phase: Phase | None = None) -> Expr:
     match expr:
         case Symbol() as symbol:
             return reference(symbol, table, phase)
-        case Integer() | Boolean() | Char() | Nil():
+        case Integer() | Char():
             return expr
         case SList([Symbol() as head, SList(parameters), body]) if (
             head.identifier == "lambda"
@@ -297,19 +297,25 @@ def parse(expr: Expr, table: BindingTable, phase: Phase | None = None) -> Expr:
                     case _:
                         raise ParseError(f"malformed letrec binding: {pair}")
             return SList([Symbol("letrec"), SList(bindings), parse(body, table, phase)])
-        case SList([Symbol() as head, test, consequent, alternative]) if (
-            head.identifier == "if"
-        ):
+        case SList([Symbol() as head, scrutinee, *clauses]) if (
+            head.identifier == "match"
+        ) and clauses:
             return SList(
                 [
-                    Symbol("if"),
-                    parse(test, table, phase),
-                    parse(consequent, table, phase),
-                    parse(alternative, table, phase),
+                    Symbol("match"),
+                    parse(scrutinee, table, phase),
+                    *[pattern_clause(clause, table, phase) for clause in clauses],
                 ]
             )
+        case SList([Symbol() as head, *_]) if head.identifier == "match":
+            # A `match` with no clause, or written with no scrutinee at all.
+            raise ParseError(f"malformed match: {expr}")
         case SList([Symbol() as head, datum]) if head.identifier == "quote":
             return SList([Symbol("quote"), strip(datum)])
+        case SList([Symbol() as head, operand]) if head.identifier == "forall":
+            return SList([Symbol("forall"), binder_position(operand, table, phase)])
+        case SList([Symbol() as head, *_]) if head.identifier == "forall":
+            raise ParseError(f"malformed forall: {expr}")
         case SList([Symbol() as head, name, init]) if head.identifier == "define":
             return SList(
                 [
@@ -323,15 +329,12 @@ def parse(expr: Expr, table: BindingTable, phase: Phase | None = None) -> Expr:
             "letrec",
             "letrec-syntax",
             "syntax-rules",
-            "if",
+            "match",
             "quote",
             "define",
             "ascribe#",
             "forall#",
         }:
-            # `forall#` is listed for the reason `ascribe#` is: neither names a
-            # value, so a form headed by one at expression position is a
-            # misplaced type and not an application of something unbound.
             raise ParseError(f"malformed or un-expanded core form: {expr}")
         case SList([]):
             raise ParseError(f"empty combination: {expr}")
