@@ -195,6 +195,26 @@ def test_parse_output_is_syntax_to_the_other_builtins():
     assert run("(head (parse (expand '(f x))))") == Symbol("f")
 
 
+def test_parse_reads_an_ascribed_programs_type():
+    # An ascription survives into the parsed tree with its type read as a type:
+    # resolved where it binds, and emitted bare where it names a constructor.
+    result = run("(parse (expand '(lambda ((ascribe# x @int)) x)))")
+
+    match result:
+        case SList([_, SList([SList([keyword, _, ty])]), _]):
+            assert keyword == Symbol("ascribe#")
+            assert ty == Symbol("@int")
+        case _:
+            pytest.fail(f"unexpected shape: {result}")
+
+
+def test_parse_refuses_an_ascribed_program_whose_type_is_malformed():
+    # The failure mode the type operand gains by being read at all: this once
+    # parsed, and was refused only when the type checker came to read the type.
+    with pytest.raises(EvalError):
+        run("(parse (expand '(lambda ((ascribe# x (@list @int @int))) x)))")
+
+
 @pytest.mark.parametrize(
     "source",
     [

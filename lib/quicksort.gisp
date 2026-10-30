@@ -1,27 +1,28 @@
-(define append
-  (lambda (xs ys)
+(define (ascribe# append
+                  (@fun (@prod (@list @int) (@list @int)) (@list @int)))
+  (lambda ((ascribe# xs (@list @int)) (ascribe# ys (@list @int)))
     (if (eq xs '())
         ys
         (. (head xs) (append (tail xs) ys)))))
 
-(define keep-le
-  (lambda (p xs)
+(define (ascribe# keep-le (@fun (@prod @int (@list @int)) (@list @int)))
+  (lambda ((ascribe# p @int) (ascribe# xs (@list @int)))
     (if (eq xs '())
         xs
         (if (le (head xs) p)
             (. (head xs) (keep-le p (tail xs)))
             (keep-le p (tail xs))))))
 
-(define keep-gt
-  (lambda (p xs)
+(define (ascribe# keep-gt (@fun (@prod @int (@list @int)) (@list @int)))
+  (lambda ((ascribe# p @int) (ascribe# xs (@list @int)))
     (if (eq xs '())
         xs
         (if (le (head xs) p)
             (keep-gt p (tail xs))
             (. (head xs) (keep-gt p (tail xs)))))))
 
-(define sort
-  (lambda (xs)
+(define (ascribe# sort (@fun (@prod (@list @int)) (@list @int)))
+  (lambda ((ascribe# xs (@list @int)))
     (if (le (len xs) 1)
         xs
         (append (sort (keep-le (head xs) (tail xs)))

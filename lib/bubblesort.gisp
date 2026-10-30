@@ -1,14 +1,14 @@
-(define pass
-  (lambda (xs)
+(define (ascribe# pass (@fun (@prod (@list @int)) (@list @int)))
+  (lambda ((ascribe# xs (@list @int)))
     (if (le (len xs) 1)
         xs
         (if (le (head xs) (head (tail xs)))
             (. (head xs) (pass (tail xs)))
             (. (head (tail xs)) (pass (. (head xs) (tail (tail xs)))))))))
 
-(define sort
-  (lambda (xs)
-    (letrec ((ys (pass xs)))
+(define (ascribe# sort (@fun (@prod (@list @int)) (@list @int)))
+  (lambda ((ascribe# xs (@list @int)))
+    (letrec (((ascribe# ys (@list @int)) (pass xs)))
       (if (eq xs ys)
           xs
           (sort ys)))))

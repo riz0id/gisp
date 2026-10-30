@@ -17,9 +17,17 @@ from Analysis.CExpr import (
 )
 from Analysis.Path import Path
 from Analysis.Support import Support
-from Resolve import BindingTable, Unbound, resolve
+from Resolve import BindingTable, meaning
 from Syntax import Expr, SList, Symbol, binder_name
-from Syntax.Type import BoolType, CharType, Context, FunType, IntType, Type
+from Syntax.Type import (
+    CONSTRUCTORS,
+    BoolType,
+    CharType,
+    Context,
+    FunType,
+    IntType,
+    Type,
+)
 
 
 class OccurrenceError(Exception):
@@ -36,13 +44,6 @@ class Region(Enum):
 class Guard:
     test: CExpr
     consequent: bool
-
-
-def meaning(symbol: Symbol, table: BindingTable) -> Symbol:
-    try:
-        return resolve(symbol, table).binder
-    except Unbound:
-        return Symbol(symbol.identifier)
 
 
 def occurs_in(var: Symbol, expr: Expr, table: BindingTable) -> bool:
@@ -275,16 +276,15 @@ GROUNDS: Final[tuple[Type, ...]] = (IntType(), CharType(), BoolType())
 
 
 def constructs(head: Symbol, table: BindingTable) -> bool:
-    # Whether a head spells a constructor rather than an application head.
+    # Whether a head names a constructor rather than an application head.
     # `check` tells the two apart by the type it is checking against, which a
-    # shallow reading does not have, so a constructor spelling is left unread:
+    # shallow reading does not have, so a constructor is left unread:
     # `Context.default()` ascribes `prod#` a function returning the empty
     # product, and `(prod# 1 #t)` is a two-field product and not that.
-    return meaning(head, table) in {
-        Symbol("list"),
-        Symbol("prod#"),
-        Symbol("lambda"),
-    }
+    #
+    # The identifiers come from `Syntax.Type`, where `is_constructor` compares a
+    # resolved head against the one its sort expects.
+    return meaning(head, table) in CONSTRUCTORS
 
 
 def ascription(operand: CExpr, context: Context, table: BindingTable) -> Type | None:

@@ -269,16 +269,6 @@ def test_a_letrec_name_is_not_a_use():
     assert conditions(Symbol("g", {Scope(0)}), program, table) == []
 
 
-def test_choice_branches_are_ordinary_subexpressions():
-    expanded = expand(read("(lambda (x) (choice 1 2 (if x 1 2) 3))"), fresh=counter())
-    program = parse(expanded, bindings(expanded))
-    table = bindings(program)
-
-    assert conditions(Symbol("x", {Scope(0)}), program, table) == [
-        VarCExpr(Symbol("x", {Scope(0)}))
-    ]
-
-
 def test_a_quoted_occurrence_is_not_the_bound_variable():
     expanded = expand(
         read("(lambda (x) (if #t (quote (if x 1 2)) 2))"), fresh=counter()

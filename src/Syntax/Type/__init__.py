@@ -1,7 +1,8 @@
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
+from typing import Final
 
-from Resolve import BindingTable
+from Resolve import BindingTable, meaning
 from Syntax import Char, Expr, Integer, Symbol
 from Syntax.Type.BoolType import BoolType
 from Syntax.Type.CharType import CharType
@@ -10,14 +11,19 @@ from Syntax.Type.IntType import IntType
 from Syntax.Type.ListType import ListType
 from Syntax.Type.MuType import MuType
 from Syntax.Type.ProdType import ProdType
+from Syntax.Type.Scheme import Scheme
 from Syntax.Type.SumType import SumType
-from Syntax.Type.Type import ConstructorArity, Type, meaning
+from Syntax.Type.Type import ConstructorArity, Type
 from Syntax.Type.VariadicType import VariadicStarType, VariadicType
 from Syntax.Type.VarType import VarType
 
 __all__: list[str] = [
     "BoolType",
     "CharType",
+    "ABSTRACTION",
+    "CONSTRUCTORS",
+    "LIST",
+    "PRODUCT",
     "ConstructorArity",
     "Context",
     "FunType",
@@ -25,6 +31,7 @@ __all__: list[str] = [
     "ListType",
     "MuType",
     "ProdType",
+    "Scheme",
     "SumType",
     "Type",
     "VarType",
@@ -35,7 +42,7 @@ __all__: list[str] = [
     "is_constructor",
     "is_nullary_type",
     "meaning",
-    "nullary_type_of",
+    "solve",
     "substitute",
     "substitute_arguments",
     "type_constructor_arity",
@@ -52,6 +59,12 @@ def type_constructor_arity(ty: Type, context: Context) -> int:
             # A nullary constructor takes no type arguments, and thus has
             # arity zero.
             return 0
+        case VarType(binder=binder) if binder in context.rigid:
+            # An abstract variable denotes no one type, so there is no arity to
+            # answer with. Raised rather than answered, as for an unbound one,
+            # but diagnosed apart from it: this is a type checked inside the
+            # body of the scheme that quantifies it, and not a bug.
+            raise ValueError(f"abstract type variable has no arity: {binder}")
         case VarType(binder=binder):
             # A variable is not a constructor and has no arity of its own: it
             # stands for the type bound to it, and answers whatever that type
@@ -110,6 +123,11 @@ def type_constructor_symbol(ty: Type, context: Context) -> Symbol:
             # As in `type_constructor_arity`: a fact about the written form, so
             # the body is neither bound nor descended into.
             return Symbol(identifier="@mu")
+        case VarType(binder=binder) if binder in context.rigid:
+            # As in `type_constructor_arity`: an abstract variable denotes no
+            # one type, so it has no constructor to be spelled. Its own binder
+            # is the spelling, and that names a variable rather than a type.
+            raise ValueError(f"abstract type variable has no constructor: {binder}")
         case VarType(binder=binder):
             # A variable has no spelling of its own: it is written as its
             # binder, but it *is* the type bound to it, and that is what is
@@ -127,6 +145,13 @@ def constructor_arity(ty: Type, context: Context) -> ConstructorArity:
             # Literals have zero-arity, meaning the constructor (some integer,
             # character, or boolean literal) has no arguments.
             return 0
+        case VarType(binder=binder) if binder in context.rigid:
+            # Nothing constructs an abstract type: a term of it would have to
+            # inhabit every instance the variable can be taken at. Unreachable
+            # from `check`, whose dispatch consults `is_constructor` first and
+            # is answered `False` there, and raised rather than answered so a
+            # caller that did reach it is not handed an arity it could use.
+            raise ValueError(f"abstract type variable is not constructed: {binder}")
         case VarType(binder=binder):
             # A type variable is constructed however the type bound to it is.
             return constructor_arity(context.variable(binder), context)
@@ -161,6 +186,17 @@ def constructor_arity(ty: Type, context: Context) -> ConstructorArity:
             raise ValueError(f"not a type: {ty}")
 
 
+# The binders that construct a term of a sort that is not written as a literal.
+# Named once each, because `is_constructor` compares a resolved head against the
+# one its sort expects while a reader without a type to check against can only
+# ask whether a head is any of them — and those two readings must not drift.
+LIST: Final[Symbol] = Symbol("list")
+PRODUCT: Final[Symbol] = Symbol("prod#")
+ABSTRACTION: Final[Symbol] = Symbol("lambda")
+
+CONSTRUCTORS: Final[frozenset[Symbol]] = frozenset({LIST, PRODUCT, ABSTRACTION})
+
+
 def is_constructor(ty: Type, expr: Expr, context: Context, table: BindingTable) -> bool:
     # Whether `expr` is a constructor occurrence of `ty`: a literal of the sort
     # it classifies, or a reference resolving to the binder that constructs it.
@@ -177,13 +213,20 @@ def is_constructor(ty: Type, expr: Expr, context: Context, table: BindingTable) 
                     return binder in context and context[binder] == BoolType()
                 case _:
                     return False
+        case VarType(binder=binder) if binder in context.rigid:
+            # No expression is a constructor occurrence of an abstract type,
+            # which is what makes the body of a polymorphic function checkable:
+            # a literal checked against the variable it quantifies is refused
+            # by the caller as the non-inhabitant it is, rather than resolving
+            # the variable to a type the instance need not be.
+            return False
         case VarType(binder=binder):
             # A type variable is constructed however the type bound to it is.
             return is_constructor(context.variable(binder), expr, context, table)
         case ListType():
             match expr:
                 case Symbol() as symbol:
-                    return meaning(symbol, table) == Symbol("list")
+                    return meaning(symbol, table) == LIST
                 case _:
                     return False
         case SumType(cons=cons):
@@ -197,13 +240,13 @@ def is_constructor(ty: Type, expr: Expr, context: Context, table: BindingTable) 
         case ProdType():
             match expr:
                 case Symbol() as symbol:
-                    return meaning(symbol, table) == Symbol("prod#")
+                    return meaning(symbol, table) == PRODUCT
                 case _:
                     return False
         case FunType():
             match expr:
                 case Symbol() as symbol:
-                    return meaning(symbol, table) == Symbol("lambda")
+                    return meaning(symbol, table) == ABSTRACTION
                 case _:
                     return False
         case VariadicType() | VariadicStarType():
@@ -232,6 +275,13 @@ def is_nullary_type(ty: Type, context: Context) -> bool:
     match ty:
         case IntType() | CharType() | BoolType():
             return True
+        case VarType(binder=binder) if binder in context.rigid:
+            # An abstract variable is written as a bare name, but it is not a
+            # ground type: it classifies whatever its instance classifies, and
+            # a scheme may be instantiated at a compound type as readily as a
+            # ground one. Answered rather than raised, because this is a
+            # question about a spelling and an abstract variable has one.
+            return False
         case VarType(binder=binder):
             # As in the four queries: a variable answers for the type bound to
             # it, and `context.variable` refuses an unbound one rather than
@@ -253,19 +303,6 @@ def is_nullary_type(ty: Type, context: Context) -> bool:
             return False
         case _:
             raise ValueError(f"not a type: {ty}")
-
-
-def nullary_type_of(symbol: Symbol, context: Context) -> Type:
-    # The reverse of each nullary type's own `type_constructor_symbol`, read by
-    # identifier only: the symbol reaching here is `parse()`'s scope-stripped
-    # output, so comparing full `Symbol` equality would be an accident to rely
-    # on. Only the nullary types are listed — a compound type is written as a
-    # list, and no spelling of one arrives here as a bare symbol.
-    for ty in (IntType(), CharType(), BoolType()):
-        if type_constructor_symbol(ty, context).identifier == symbol.identifier:
-            return ty
-
-    raise ValueError(f"not a nullary type: {symbol}")
 
 
 def unfold(recursive: MuType) -> Type:
@@ -366,6 +403,105 @@ def substitute_arguments(
             )
 
 
+def solve(
+    pattern: Type,
+    target: Type,
+    variables: frozenset[Symbol],
+    solution: dict[Symbol, Type],
+) -> bool:
+    # Whether `target` is `pattern` with each of `variables` taken at some type,
+    # recording those types in `solution`. This is how a scheme is instantiated:
+    # the instance is read off a type the judgment already has, rather than
+    # solved for as an unknown.
+    #
+    # One-way matching and not unification. Only `pattern` may be written over
+    # `variables`; `target` is a type the checker was handed, so it is ground or
+    # written over the *rigid* variables of an enclosing scheme, which match as
+    # the opaque types they are. Nothing is ever solved to a type still
+    # containing an unsolved variable, so there is no occurs check to make.
+    match pattern:
+        case VarType(binder=binder) if binder in variables:
+            if binder in solution:
+                # A variable occurring twice must be taken at one type, which is
+                # what makes `(eq 1 #t)` a refusal rather than two instances.
+                return solution[binder] == target
+            else:
+                solution[binder] = target
+                return True
+        case IntType() | CharType() | BoolType() | VarType():
+            # A ground type, or a variable this scheme does not quantify: there
+            # is nothing to solve, so matching is equality.
+            return pattern == target
+        case ListType(element=element):
+            match target:
+                case ListType(element=other):
+                    return solve(element, other, variables, solution)
+                case _:
+                    return False
+        case VariadicType(argument=argument):
+            match target:
+                case VariadicType(argument=other):
+                    return solve(argument, other, variables, solution)
+                case _:
+                    return False
+        case VariadicStarType(argument=argument):
+            match target:
+                case VariadicStarType(argument=other):
+                    return solve(argument, other, variables, solution)
+                case _:
+                    return False
+        case ProdType() as product:
+            match target:
+                case ProdType() as other if product.names() == other.names() and len(
+                    product.types()
+                ) == len(other.types()):
+                    # Shapes must agree, names and all. A tuple and a record of
+                    # the same field types are distinct under `==` today, and
+                    # matching inherits that rather than deciding it afresh.
+                    return all(
+                        solve(field_type, other_type, variables, solution)
+                        for field_type, other_type in zip(
+                            product.types(), other.types(), strict=True
+                        )
+                    )
+                case _:
+                    return False
+        case SumType() as total:
+            match target:
+                case SumType() as other if total.cons.keys() == other.cons.keys():
+                    return all(
+                        solve(payload, other.cons[constructor], variables, solution)
+                        for constructor, payload in total.cons.items()
+                    )
+                case _:
+                    return False
+        case FunType(return_type=return_type, argument_type=argument_type):
+            match target:
+                case FunType(return_type=other_return, argument_type=other_argument):
+                    return solve(
+                        return_type, other_return, variables, solution
+                    ) and solve(argument_type, other_argument, variables, solution)
+                case _:
+                    return False
+        case MuType(variable=bound, body=body):
+            match target:
+                case MuType(variable=other_bound, body=other_body) if (
+                    bound == other_bound
+                ):
+                    # The variable is bound by the `@mu` and not quantified by
+                    # the scheme, so it is removed from what may be solved.
+                    return solve(body, other_body, variables - {bound}, solution)
+                case _:
+                    # Two recursive types written over different variables are
+                    # compared whole. Matching equirecursive types up to the
+                    # renaming of their binders is not attempted, so a scheme
+                    # instantiated at such a type is refused rather than
+                    # silently taken at the wrong one.
+                    return pattern == target
+        case _:
+            raise ValueError(f"not a type: {pattern}")
+
+
 @dataclass(frozen=True, slots=True)
 class Context:
     # Term binders and the types they are ascribed. These accumulate
@@ -377,6 +513,26 @@ class Context:
     # accumulated: a variable means something only inside the body that binds
     # it, so `bind` returns a new context instead of mutating this one.
     variables: Mapping[Symbol, Type] = field(default_factory=dict)
+
+    # Binders ascribed a polymorphic type. Kept in a field of their own rather
+    # than widening `ascriptions` to hold either sort, because `__contains__`
+    # and `__getitem__` answer for `ascriptions` alone and every reader outside
+    # this module reads a type through them: `Analysis.ascription` asks what a
+    # binder is ascribed and expects a `Type`, and a polymorphic binder is
+    # simply absent from what it reads, which is the answer it already gives
+    # one. Instantiation is the type checker's to do, and only it looks here.
+    schemes: dict[Symbol, Scheme] = field(default_factory=dict)
+
+    # Type variables that are abstract: quantified by a scheme whose body is
+    # being checked, and so standing for nothing yet.
+    #
+    # The distinction `variables` cannot make. A variable bound there stands for
+    # a known type and every query answers for that type; one named here stands
+    # for any type at all, so a query must answer for none of them rather than
+    # resolve it. `variable` raising on an unbound name is what keeps the two
+    # from being confused — an abstract variable is not an unbound one, and the
+    # `VarType` arms read this set before they resolve.
+    rigid: frozenset[Symbol] = frozenset()
 
     def __iter__(self) -> Iterator[Symbol]:
         return iter(self.ascriptions)
@@ -398,6 +554,20 @@ class Context:
         else:
             self.ascriptions[binder] = ty
 
+    def register_scheme(self, binder: Symbol, scheme: Scheme) -> None:
+        if binder in self.ascriptions:
+            raise ValueError(
+                f"Attempt to bind {binder}={scheme}, but"
+                f" {binder}={self.ascriptions[binder]} already bound."
+            )
+        elif binder in self.schemes and self.schemes[binder] != scheme:
+            raise ValueError(
+                f"Attempt to bind {binder}={scheme}, but"
+                f" {binder}={self.schemes[binder]} already bound."
+            )
+        else:
+            self.schemes[binder] = scheme
+
     def bind(self, variable: Symbol, ty: Type) -> Context:
         # An inner `@mu` of the same variable shadows the outer one rather than
         # conflicting with it, which is the rule `guarded` and `substitute`
@@ -409,7 +579,36 @@ class Context:
         # would make the `VarType` arms recur forever, which is what `guarded`
         # rules out — assumed of every type the language builds and, as with
         # `substitute`'s no-capture precondition, documented and not enforced.
-        return Context(self.ascriptions, {**self.variables, variable: ty})
+        #
+        # A variable given a meaning here is no longer abstract, so it leaves
+        # `rigid`: a scheme's body may well write `(@mu a ...)` over one of its
+        # own quantified spellings, and within that `@mu` the name stands for
+        # the recursive type and not for the instance.
+        return Context(
+            self.ascriptions,
+            {**self.variables, variable: ty},
+            self.schemes,
+            self.rigid - {variable},
+        )
+
+    def abstract(self, variables: tuple[Symbol, ...]) -> Context:
+        # This context with `variables` made abstract, which is what a scheme's
+        # body is checked under. Functional like `bind` and for the same reason:
+        # a quantified variable means something only inside the body that binds
+        # it. The two mutable namespaces are shared by reference, so a parameter
+        # registered while checking that body lands in the one store.
+        return Context(
+            self.ascriptions,
+            self.variables,
+            self.schemes,
+            self.rigid | set(variables),
+        )
+
+    def scheme(self, binder: Symbol) -> Scheme:
+        if binder in self.schemes:
+            return self.schemes[binder]
+        else:
+            raise ValueError(f"no scheme ascribed: {binder}")
 
     def variable(self, binder: Symbol) -> Type:
         # The counterpart to `__getitem__` for the other namespace, raising
@@ -424,6 +623,13 @@ class Context:
     def default(cls) -> Context:
         binop: ProdType = ProdType({Symbol("a"): IntType(), Symbol("b"): IntType()})
 
+        # The one variable every builtin scheme is written over. Schemes are
+        # instantiated by substitution and never nest, so one spelling serves
+        # them all: no two of these is ever read under the other.
+        a: Symbol = Symbol("a")
+        element: VarType = VarType(a)
+        listed: ListType = ListType(element)
+
         return cls(
             {
                 Symbol("#t"): BoolType(),
@@ -435,5 +641,49 @@ class Context:
                 Symbol("mod"): FunType(return_type=IntType(), argument_type=binop),
                 Symbol("lt"): FunType(return_type=BoolType(), argument_type=binop),
                 Symbol("le"): FunType(return_type=BoolType(), argument_type=binop),
-            }
+            },
+            schemes={
+                # The selectors and the constructor. Each writes its variable
+                # into its result, so the checked type names the instance on its
+                # own and no operand has to be synthesized for them.
+                Symbol("head"): Scheme(
+                    variables=(a,),
+                    body=FunType(
+                        return_type=element,
+                        argument_type=ProdType([listed]),
+                    ),
+                ),
+                Symbol("tail"): Scheme(
+                    variables=(a,),
+                    body=FunType(
+                        return_type=listed,
+                        argument_type=ProdType([listed]),
+                    ),
+                ),
+                Symbol("."): Scheme(
+                    variables=(a,),
+                    body=FunType(
+                        return_type=listed,
+                        argument_type=ProdType([element, listed]),
+                    ),
+                ),
+                # The two that write their variable only among their arguments,
+                # and so are instantiated from an operand rather than from the
+                # checked type. `solve` already anticipates one of them: it is
+                # the repeated variable that makes `(eq 1 #t)` a refusal.
+                Symbol("eq"): Scheme(
+                    variables=(a,),
+                    body=FunType(
+                        return_type=BoolType(),
+                        argument_type=ProdType([element, element]),
+                    ),
+                ),
+                Symbol("len"): Scheme(
+                    variables=(a,),
+                    body=FunType(
+                        return_type=IntType(),
+                        argument_type=ProdType([listed]),
+                    ),
+                ),
+            },
         )

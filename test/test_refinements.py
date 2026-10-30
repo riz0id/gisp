@@ -43,10 +43,10 @@ def var(identifier: str, *uids: int) -> Symbol:
 
 
 def context(ascriptions: dict[Symbol, Type] | None = None) -> Context:
-    # The ascriptions the walk reads, asserted rather than checked: `eq` is
-    # polymorphic and so has no ascription of its own, which means no program
-    # with an `eq` guard passes `check` and `check` is not what puts these
-    # here. A fresh context per test, because `register` mutates.
+    # The ascriptions the walk reads, asserted rather than checked: these
+    # programs are given to the walk directly and never to `check`, so nothing
+    # has put a binder's type in the store for it. A fresh context per test,
+    # because `register` mutates.
     rets: Context = Context.default()
 
     for binder, ty in (ascriptions or {}).items():

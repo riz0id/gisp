@@ -3,25 +3,10 @@ from itertools import count
 
 import pytest
 
-from Expander import ParseError, expand, parse, parse_type, strip
+from Expander import ParseError, expand, parse, strip, type_syntax
 from Reader import read
 from Resolve import Ambiguous, BindingTable, bindings
 from Syntax import Char, Expr, Integer, Keyword, Nil, Scope, SList, Symbol
-from Syntax.Type import (
-    BoolType,
-    CharType,
-    FunType,
-    IntType,
-    ListType,
-    MuType,
-    ProdType,
-    SumType,
-    Type,
-    VariadicStarType,
-    VariadicType,
-    VarType,
-    unfold,
-)
 
 # Fixtures inject deterministic counters from the 1300s so no expectation
 # depends on the global fresh-uid counter and no uid collides with another
@@ -158,18 +143,6 @@ def test_if_parses_positionally_with_a_bare_head():
     )
 
 
-def test_choice_parses_as_an_application_with_a_free_head():
-    x = Symbol("x", {Scope(1335)})
-
-    assert pipeline("(lambda (x) (choice 1 2 5 x))", 1335) == SList(
-        [
-            Symbol("lambda"),
-            SList([x]),
-            SList([Symbol("choice"), Integer(1), Integer(2), Integer(5), x]),
-        ]
-    )
-
-
 def test_constants_are_leaves():
     assert pipeline('(f 5 #t prod# "hi")', 1340) == SList(
         [
@@ -231,42 +204,6 @@ def test_ambiguous_references_propagate():
 
     with pytest.raises(Ambiguous):
         parse(Symbol("x", {Scope(1350), Scope(1351), Scope(1352)}), table)
-
-
-# -- end to end ------------------------------------------------------------------
-
-
-def test_macro_expanded_programs_parse():
-    # The same program the stochastic analysis consumes: the macro-introduced
-    # identity and both diverging lambdas parse, every residual reference is
-    # discharged, and the body's head lands on the user's binder.
-    expanded = expand(
-        read(
-            "(letrec-syntax ((id (syntax-rules () ((_) (lambda (v) v)))))"
-            " ((lambda (f) (f y))"
-            "  (choice 1 3 (id) ((lambda (d) (d d)) (lambda (d) (d d))))))"
-        ),
-        fresh=counter(1360),
-    )
-    parsed = parse(expanded, bindings(expanded))
-
-    match parsed:
-        case SList(
-            [
-                SList(
-                    [
-                        _,
-                        SList([Symbol() as f]),
-                        SList([Symbol() as head, Symbol() as free]),
-                    ]
-                ),
-                _,
-            ]
-        ):
-            assert head == f
-            assert free == Symbol("y")
-        case _:
-            pytest.fail(f"unexpected shape: {parsed}")
 
 
 # -- type ascription -----------------------------------------------------------
@@ -381,46 +318,170 @@ def test_a_macro_introduced_ascription_is_recognized():
             pytest.fail(f"unexpected parse: {other}")
 
 
-# -- types -----------------------------------------------------------------------
+def test_a_macro_introduced_ascription_takes_a_compound_type():
+    # The use site supplies a whole type, spliced beneath a template `ascribe#`:
+    # the operand carries use-site scopes and the keyword template ones. The
+    # type's own binders are scoped where the type was written, so the
+    # quantified variable still resolves to the quantifier that bound it.
+    source = (
+        "(letrec-syntax ((m (syntax-rules () ((m t) (lambda ((ascribe# y t)) y)))))"
+        " (m (forall# (a) (@fun (@prod a) a))))"
+    )
+    expanded = expand(read(source), fresh=counter(1375))
+
+    match parse(expanded, bindings(expanded)):
+        case SList([_, SList([SList([_, _, ty])]), _]):
+            pass
+        case other:
+            pytest.fail(f"unexpected parse: {other}")
+
+    match ty:
+        case SList([_, SList([bound]), SList([_, SList([_, argument]), returned])]):
+            pass
+        case other:
+            pytest.fail(f"not a parsed forall#: {other}")
+
+    assert bound.identifier == "a"
+    assert bound == argument == returned
 
 
-def type_of(source: str) -> Type:
-    # A written type read and then parsed, which is how every type reaches
-    # `parse_type` from source.
-    return parse_type(read(source))
+def test_a_macro_introduced_malformed_type_is_refused():
+    # The template is well formed and the use site is not, so the refusal has to
+    # come from the type the use site supplied.
+    source = (
+        "(letrec-syntax ((m (syntax-rules () ((m t) (lambda ((ascribe# y t)) y)))))"
+        " (m (@list @int @int)))"
+    )
+    expanded = expand(read(source), fresh=counter(1380))
+
+    with pytest.raises(ParseError):
+        parse(expanded, bindings(expanded))
 
 
-def test_every_ground_type_is_written_as_a_bare_symbol():
-    assert type_of("@int") == IntType()
-    assert type_of("@char") == CharType()
-    assert type_of("@bool") == BoolType()
+def test_the_binding_table_round_trips_through_a_parsed_type():
+    # `bindings` is called on an expanded tree to parse it, and on the parsed
+    # tree by every later reader, so the two tables have to agree. A type binder
+    # reaches the second only if `bindings` reads `@mu` and `forall#` as the
+    # binding forms they are — and the parse phase resolved against the first,
+    # so a binder missing from the second is one no later reader could find.
+    source = (
+        "(lambda ((ascribe# f (forall# (a) (@fun (@prod (@mu b (@list b))) a)))) f)"
+    )
+    expanded = expand(read(source), fresh=counter(1385))
+    before = bindings(expanded)
+    parsed = parse(expanded, before)
+
+    assert set(bindings(parsed)) == set(before)
+    assert {binder.identifier for binder in before} == {"f", "a", "b"}
 
 
-def test_a_list_type_is_written_over_its_element():
-    assert type_of("(@list @int)") == ListType(IntType())
-    assert type_of("(@list (@list @char))") == ListType(ListType(CharType()))
+# -- types: written form and binding ---------------------------------------------
+#
+# The parse phase checks how a type is written and resolves the variables within
+# it. What a type denotes — its rank, its kinds, its guardedness — is read by
+# `TypeCheck.Elaborate`, and `test_elaborate.py` covers that.
 
 
-def test_the_nullary_product_is_written_with_no_fields():
-    assert type_of("(@prod)") == ProdType()
+def type_operand(source: str, expand_at: int = 1600) -> Expr:
+    # The parsed type operand of `(lambda ((ascribe# x <source>)) x)`, which is
+    # how a written type reaches the parse phase: through a binder position, in
+    # a real program, after expansion has scoped it.
+    program = f"(lambda ((ascribe# x {source})) x)"
+    expanded = expand(read(program), fresh=counter(expand_at))
+
+    match parse(expanded, bindings(expanded)):
+        case SList([_, SList([SList([_, _, ty])]), _]):
+            return ty
+        case parsed:
+            raise AssertionError(f"not an ascribed lambda: {parsed}")
 
 
-def test_a_positional_product_keeps_its_fields_in_order():
-    assert type_of("(@prod @int @bool)") == ProdType([IntType(), BoolType()])
+def test_a_ground_type_is_emitted_with_an_empty_scope_set():
+    # A type constructor's identifier names no variable and resolves against
+    # nothing, so it is re-emitted bare exactly as `parse` rebuilds `lambda`.
+    for source in ["@int", "@char", "@bool"]:
+        assert type_operand(source) == Symbol(source)
 
 
-def test_a_named_product_is_a_record_of_bare_names():
-    record = type_of("(@prod (head @int) (tail @bool))")
+def test_a_compound_type_keeps_its_shape_and_empties_its_scopes():
+    assert type_operand("(@list @int)") == SList([Symbol("@list"), Symbol("@int")])
+    assert type_operand("(@fun (@prod @int) @bool)") == SList(
+        [
+            Symbol("@fun"),
+            SList([Symbol("@prod"), Symbol("@int")]),
+            Symbol("@bool"),
+        ]
+    )
 
-    assert record == ProdType({Symbol("head"): IntType(), Symbol("tail"): BoolType()})
-    assert isinstance(record, ProdType)
-    assert record.names() == (Symbol("head"), Symbol("tail"))
+
+def test_a_field_name_is_emitted_with_an_empty_scope_set():
+    # A record's field name labels a position; it binds nothing and refers to
+    # nothing, so it is emitted bare like a constructor's identifier.
+    assert type_operand("(@prod (head @int) (tail @bool))") == SList(
+        [
+            Symbol("@prod"),
+            SList([Symbol("head"), Symbol("@int")]),
+            SList([Symbol("tail"), Symbol("@bool")]),
+        ]
+    )
 
 
-def test_a_field_written_as_a_type_form_stays_positional():
-    # The disambiguation: `(@list @int)` is a type and not a field named
-    # `@list`, which is what the `@` spelling tells apart.
-    assert type_of("(@prod (@list @int))") == ProdType([ListType(IntType())])
+def test_a_type_variable_resolves_to_its_binder():
+    # The whole point of the merge: a type variable goes through the one binding
+    # mechanism, so its occurrence comes back as the very binder `@mu` minted.
+    match type_operand("(@mu a (@list a))"):
+        case SList([_, bound, SList([_, occurrence])]):
+            pass
+        case parsed:
+            raise AssertionError(f"not a parsed @mu: {parsed}")
+
+    assert bound.identifier == "a"
+    assert bound == occurrence
+    assert bound.scopes != set()
+
+
+def test_a_quantified_variable_resolves_to_its_binder():
+    match type_operand("(forall# (a) (@fun (@prod a) a))"):
+        case SList([_, SList([bound]), SList([_, SList([_, argument]), returned])]):
+            pass
+        case parsed:
+            raise AssertionError(f"not a parsed forall#: {parsed}")
+
+    assert bound.identifier == "a"
+    assert bound == argument == returned
+
+
+def test_nested_recursive_types_resolve_to_their_own_binders():
+    # An inner `@mu` reusing an identifier is a distinct binder, so the inner
+    # body's occurrence is the inner binder and not the outer one. This is what
+    # the set of identifier strings could only approximate.
+    match type_operand("(@mu a (@prod (@mu a (@prod a))))"):
+        case SList([_, outer, SList([_, SList([_, inner, SList([_, occurrence])])])]):
+            pass
+        case parsed:
+            raise AssertionError(f"not a nested @mu: {parsed}")
+
+    assert outer.identifier == inner.identifier == "a"
+    assert outer != inner
+    assert occurrence == inner
+
+
+def test_an_outer_type_binder_reaches_inside_an_inner_one():
+    match type_operand("(@mu a (@prod (@mu b (@prod a))))"):
+        case SList([_, outer, SList([_, SList([_, _, SList([_, occurrence])])])]):
+            pass
+        case parsed:
+            raise AssertionError(f"not a nested @mu: {parsed}")
+
+    assert occurrence == outer
+
+
+@pytest.mark.parametrize("source", ["a", "(@list a)", "(@prod (x a))"])
+def test_a_free_type_variable_is_refused(source: str):
+    # Nothing binds the identifier, so it stands for no type. Refused here
+    # rather than emitted for a later reading to refuse instead.
+    with pytest.raises(ParseError):
+        type_operand(source)
 
 
 @pytest.mark.parametrize(
@@ -429,19 +490,12 @@ def test_a_field_written_as_a_type_form_stays_positional():
 )
 def test_a_product_mixing_named_and_positional_fields_is_refused(source: str):
     with pytest.raises(ParseError):
-        type_of(source)
+        type_operand(source)
 
 
 def test_a_product_repeating_a_field_name_is_refused():
     with pytest.raises(ParseError):
-        type_of("(@prod (x @int) (x @bool))")
-
-
-def test_a_sum_is_written_as_its_constructors():
-    assert type_of("(@sum (zero (@prod)) (succ @int))") == SumType(
-        {Symbol("zero"): ProdType(), Symbol("succ"): IntType()}
-    )
-    assert type_of("(@sum (only @int))") == SumType({Symbol("only"): IntType()})
+        type_operand("(@prod (x @int) (x @bool))")
 
 
 @pytest.mark.parametrize("source", ["(@sum)", "(@sum @int)", "(@sum (@list @int))"])
@@ -450,42 +504,12 @@ def test_a_sum_is_refused_without_a_constructor_for_every_payload(source: str):
     # is this phase's; a payload written without a name has no constructor to
     # be reached by.
     with pytest.raises(ParseError):
-        type_of(source)
+        type_operand(source)
 
 
 def test_a_sum_repeating_a_constructor_is_refused():
     with pytest.raises(ParseError):
-        type_of("(@sum (c @int) (c @bool))")
-
-
-def test_the_variadic_runs_are_written_over_one_type():
-    assert type_of("(@variadic @int)") == VariadicType(IntType())
-    assert type_of("(@variadic* @int)") == VariadicStarType(IntType())
-
-
-def test_a_function_type_is_written_run_then_return():
-    assert type_of("(@fun (@prod @int @int) @bool)") == FunType(
-        return_type=BoolType(), argument_type=ProdType([IntType(), IntType()])
-    )
-    assert type_of("(@fun (@prod) @bool)") == FunType(return_type=BoolType())
-    assert type_of("(@fun (@prod (n @int)) @int)") == FunType(
-        return_type=IntType(), argument_type=ProdType({Symbol("n"): IntType()})
-    )
-
-
-def test_a_function_type_is_written_over_a_variadic_run():
-    assert type_of("(@fun (@variadic @int) @int)") == FunType(
-        return_type=IntType(), argument_type=VariadicType(IntType())
-    )
-    assert type_of("(@fun (@variadic* @int) @int)") == FunType(
-        return_type=IntType(), argument_type=VariadicStarType(IntType())
-    )
-
-
-def test_a_function_type_over_a_type_that_is_no_run_is_refused():
-    # `@int` classifies values, and a function is applied to an argument list.
-    with pytest.raises(ParseError):
-        type_of("(@fun @int @int)")
+        type_operand("(@sum (c @int) (c @bool))")
 
 
 @pytest.mark.parametrize(
@@ -494,98 +518,16 @@ def test_a_function_type_over_a_type_that_is_no_run_is_refused():
 )
 def test_a_function_type_takes_exactly_a_run_and_a_return(source: str):
     with pytest.raises(ParseError):
-        type_of(source)
-
-
-def test_a_recursive_type_binds_its_variable_in_its_body():
-    # The `nat()` fixture of `test_recursive_types.py`, written out.
-    assert type_of("(@mu a (@sum (zero (@prod)) (succ a)))") == MuType(
-        Symbol("a"),
-        SumType({Symbol("zero"): ProdType(), Symbol("succ"): VarType(Symbol("a"))}),
-    )
-
-
-def test_a_recursive_record_is_written_through_its_payloads():
-    # The `ints()` fixture, whose recursive position sits two sorts down.
-    source = "(@mu a (@sum (nil (@prod)) (cons (@prod (head @int) (tail a)))))"
-
-    assert type_of(source) == MuType(
-        Symbol("a"),
-        SumType(
-            {
-                Symbol("nil"): ProdType(),
-                Symbol("cons"): ProdType(
-                    {
-                        Symbol("head"): IntType(),
-                        Symbol("tail"): VarType(Symbol("a")),
-                    }
-                ),
-            }
-        ),
-    )
-
-
-def test_a_parsed_recursive_type_unfolds():
-    # What says the symbols the parser emits are the ones substitution needs:
-    # `Symbol` equality covers scopes, so a binder and its occurrences have to
-    # normalize to one value for `unfold` to replace anything at all.
-    parsed = type_of("(@mu a (@list a))")
-
-    assert isinstance(parsed, MuType)
-    assert unfold(parsed) == ListType(parsed)
-
-
-def test_a_nested_recursive_type_binds_the_same_spelling_again():
-    inner = MuType(Symbol("a"), ProdType([VarType(Symbol("a"))]))
-
-    assert type_of("(@mu a (@prod (@mu a (@prod a))))") == MuType(
-        Symbol("a"), ProdType([inner])
-    )
-
-
-def test_an_outer_binding_reaches_inside_an_inner_one():
-    # The spellings accumulate, so a variable the outer `@mu` binds is still
-    # one inside the inner's body.
-    assert type_of("(@mu a (@prod (@mu b (@prod a))))") == MuType(
-        Symbol("a"),
-        ProdType([MuType(Symbol("b"), ProdType([VarType(Symbol("a"))]))]),
-    )
-
-
-def test_a_bound_type_variable_is_read_where_it_is_passed():
-    # The parameter the `@mu` arm threads, read on its own.
-    assert parse_type(read("a"), frozenset({"a"})) == VarType(Symbol("a"))
-
-
-@pytest.mark.parametrize("source", ["a", "(@list a)", "(@prod (x a))"])
-def test_a_free_type_variable_is_refused(source: str):
-    # Nothing binds the spelling, so it stands for no type. Refused here rather
-    # than built into a `VarType` every later reading would refuse instead.
-    with pytest.raises(ParseError):
-        type_of(source)
-
-
-def test_a_recursive_type_bound_to_a_constructor_spelling_is_refused():
-    with pytest.raises(ParseError):
-        type_of("(@mu @int (@list @int))")
-
-
-def test_a_type_carrying_scopes_parses_as_the_bare_one():
-    # A macro-introduced type carries the scopes of wherever it was written, so
-    # every reading is by spelling -- as `ascription` reads its own head.
-    scoped = read("(@mu a (@sum (zero (@prod)) (succ a)))")
-    scoped.add(Scope(1370))
-
-    assert parse_type(scoped) == type_of("(@mu a (@sum (zero (@prod)) (succ a)))")
+        type_operand(source)
 
 
 @pytest.mark.parametrize(
     "source",
     ["@list", "@prod", "@sum", "@fun", "@mu", "@variadic", "@foo"],
 )
-def test_a_type_constructor_spelling_is_not_a_type_on_its_own(source: str):
+def test_a_type_constructor_identifier_is_not_a_type_on_its_own(source: str):
     with pytest.raises(ParseError):
-        type_of(source)
+        type_operand(source)
 
 
 @pytest.mark.parametrize(
@@ -598,16 +540,36 @@ def test_a_type_constructor_spelling_is_not_a_type_on_its_own(source: str):
         "(@variadic)",
         "(@variadic* @int @int)",
         "(@mu a)",
-        "(@mu (a) @int)",
         "((@list @int) @int)",
+        "(forall#)",
+        "(forall# (a))",
+        "(forall# a @int)",
+        "(forall# (a) @int @int)",
+        "(forall# (a) b)",
+        "(forall# (a) (@list))",
     ],
 )
 def test_a_malformed_or_unknown_type_form_is_refused(source: str):
     with pytest.raises(ParseError):
-        type_of(source)
+        type_operand(source)
 
 
 def test_a_datum_is_not_a_type():
     for datum in [Integer(1), Char(97), Keyword("x"), Nil(), SList([])]:
         with pytest.raises(ParseError):
-            parse_type(datum)
+            type_syntax(datum, BindingTable())
+
+
+def test_a_nested_quantifier_parses_and_is_left_to_elaboration():
+    # Rank-1 is a rule about what a type means, so the parse phase has no
+    # opinion on it: a `forall#` written inside a type resolves and is emitted,
+    # and `test_elaborate.py` covers its refusal.
+    match type_operand("(@list (forall# (a) a))"):
+        case SList([head, SList([quantifier, SList([bound]), occurrence])]):
+            pass
+        case parsed:
+            raise AssertionError(f"not a nested forall#: {parsed}")
+
+    assert head == Symbol("@list")
+    assert quantifier == Symbol("forall#")
+    assert bound == occurrence

@@ -30,7 +30,7 @@ def heads_ascribe(parameter: Expr) -> bool:
             return False
 
 
-def ascription(parameter: Expr) -> tuple[Symbol, Symbol] | None:
+def ascription(parameter: Expr) -> tuple[Symbol, Expr] | None:
     # The ⟨name, type⟩ a well-formed ascribed binder position carries, or
     # `None` when the position is not one. A bare binder and a malformed
     # ascription both answer `None`; `heads_ascribe` tells those apart.
@@ -38,8 +38,14 @@ def ascription(parameter: Expr) -> tuple[Symbol, Symbol] | None:
     # The head is read by identifier and never by `Symbol` equality: a
     # macro-introduced ascription carries the scopes of wherever it was
     # written, because the scope passes descend into every form but `quote`.
+    #
+    # The type operand is any expression and not just a symbol. Only a ground
+    # type is written as one, and a compound type — or a `forall#` over one —
+    # is written as a list, so reading the shape here would be reading the
+    # type-level grammar in a module that has no business knowing it.
+    # `Expander.parse_scheme` is what decides whether the operand names a type.
     match parameter:
-        case SList([Symbol() as head, Symbol() as name, Symbol() as ty]) if (
+        case SList([Symbol() as head, Symbol() as name, ty]) if (
             head.identifier == ASCRIBE
         ):
             return name, ty
@@ -60,5 +66,5 @@ def binder_name(parameter: Expr) -> Symbol | None:
         case Symbol() as symbol:
             return symbol
         case _:
-            ascribed: tuple[Symbol, Symbol] | None = ascription(parameter)
+            ascribed: tuple[Symbol, Expr] | None = ascription(parameter)
             return None if ascribed is None else ascribed[0]

@@ -13,6 +13,7 @@ __all__: list[str] = [
     "ResolveError",
     "Unbound",
     "bindings",
+    "meaning",
     "resolve",
     "same_variable",
 ]
@@ -71,11 +72,44 @@ def bindings(expr: Expr, phase: Phase | None = None) -> BindingTable:
 
                 for item in reversed(current.items):
                     stack.append(item)
+            case SList([Symbol() as head, Symbol() as variable, _]) if (
+                head.identifier == "@mu"
+            ):
+                # `@mu` and `forall#` bind type variables, so each is a binding
+                # position like the three above. A table rebuilt from a parsed
+                # tree has to find them: the parse phase resolves a type
+                # variable against this table, and the binder it resolved to has
+                # to be in the table the next reader builds.
+                binders.append(variable)
+
+                for item in reversed(current.items):
+                    stack.append(item)
+            case SList([Symbol() as head, SList(variables), _]) if (
+                head.identifier == "forall#"
+            ):
+                binders.extend(
+                    variable for variable in variables if isinstance(variable, Symbol)
+                )
+
+                for item in reversed(current.items):
+                    stack.append(item)
             case SList(items):
                 for item in reversed(items):
                     stack.append(item)
 
     return BindingTable(binders, phase)
+
+
+def meaning(symbol: Symbol, table: BindingTable, phase: Phase | None = None) -> Symbol:
+    # The binder a reference resolves to, or its bare identifier when the table
+    # binds nothing: an unbound head is read as the builtin it names. Every
+    # reader of an already-parsed tree wants this rather than `resolve`, because
+    # the builtins are registered nowhere and a reference to one has to come
+    # back as itself.
+    try:
+        return resolve(symbol, table, phase).binder
+    except Unbound:
+        return Symbol(symbol.identifier)
 
 
 def resolve(ref: Symbol, table: BindingTable, phase: Phase | None = None) -> Binding:

@@ -127,30 +127,6 @@ def test_quote_passes_through_untouched():
     )
 
 
-def test_choice_branches_expand_in_the_enclosing_region():
-    # choice binds nothing and introduces nothing: it is handled as a plain
-    # application, so the keyword and both branches acquire the enclosing
-    # context while the numerals pass through.
-    expanded = expand(read("(lambda (x) (choice 1 2 x x))"), fresh=counter(930))
-
-    occurrence = Symbol("x", {Scope(930)})
-    assert expanded == SList(
-        [
-            Symbol("lambda"),
-            SList([occurrence]),
-            SList(
-                [
-                    Symbol("choice", {Scope(930)}),
-                    Integer(1),
-                    Integer(2),
-                    occurrence,
-                    occurrence,
-                ]
-            ),
-        ]
-    )
-
-
 @pytest.mark.parametrize(
     "source",
     [
@@ -166,7 +142,7 @@ def test_choice_branches_expand_in_the_enclosing_region():
         "(lambda ((ascribe# x)) x)",
         "(letrec (((ascribe# n) 5)) n)",
         "(lambda ((ascribe# x @int @int)) x)",
-        "(lambda ((ascribe# x (@list @int))) x)",
+        "(lambda (((ascribe# x) @int)) x)",
         "(ascribe# x @int)",
         "(lambda (ascribe#) ascribe#)",
         "(letrec ((ascribe# 5)) ascribe#)",
@@ -182,30 +158,121 @@ def test_malformed_core_forms_are_refused(source: str):
         expand(read(source))
 
 
+def test_an_ascribed_binder_takes_a_compound_type():
+    # A compound type operand is carried through rather than refused as a
+    # malformed `ascribe#`: only a ground type is written as a bare symbol, and
+    # a binder may be ascribed any type the type-level grammar admits.
+    #
+    # The name remains the only binder of the enclosing form. The operand's
+    # scope covers the whole of it, so both constructor identifiers carry
+    # {961}; neither is resolved, since a constructor names no variable.
+    expanded = expand(
+        read("(lambda ((ascribe# x (@list @int))) x)"), fresh=counter(960)
+    )
+
+    binder = Symbol("x", {Scope(960)})
+    assert expanded == SList(
+        [
+            Symbol("lambda"),
+            SList(
+                [
+                    SList(
+                        [
+                            Symbol("ascribe#"),
+                            binder,
+                            SList(
+                                [
+                                    Symbol("@list", {Scope(961)}),
+                                    Symbol("@int", {Scope(961)}),
+                                ]
+                            ),
+                        ]
+                    )
+                ]
+            ),
+            binder,
+        ]
+    )
+
+
+def test_a_quantifier_scopes_its_variable_over_its_body():
+    # `forall#` is a binding form, so it mints a scope of its own exactly as
+    # `lambda` does. Three scopes are in play: {961} is the lambda's, reaching
+    # the name and nothing else; {962} is the type operand's, covering the whole
+    # written type; {963} is the quantifier's, covering its body, which the
+    # bound variable joins by union.
+    #
+    # That is what lets the parse phase resolve a type variable through the one
+    # binding mechanism rather than carry a set of identifiers beside the table.
+    expanded = expand(
+        read("(lambda ((ascribe# f (forall# (a) (@fun (@prod a) a)))) f)"),
+        fresh=counter(961),
+    )
+
+    binder = Symbol("f", {Scope(961)})
+    quantified = Symbol("a", {Scope(962), Scope(963)})
+    body = {Scope(962), Scope(963)}
+    assert expanded == SList(
+        [
+            Symbol("lambda"),
+            SList(
+                [
+                    SList(
+                        [
+                            Symbol("ascribe#"),
+                            binder,
+                            SList(
+                                [
+                                    Symbol("forall#", {Scope(962)}),
+                                    SList([quantified]),
+                                    SList(
+                                        [
+                                            Symbol("@fun", body),
+                                            SList([Symbol("@prod", body), quantified]),
+                                            quantified,
+                                        ]
+                                    ),
+                                ]
+                            ),
+                        ]
+                    )
+                ]
+            ),
+            binder,
+        ]
+    )
+
+
 def test_anonymous_symbols_are_refused():
     with pytest.raises(ExpandError):
         expand(Symbol(""), frozenset({Scope(940)}))
 
 
-def test_an_ascribed_lambda_parameter_scopes_only_its_name():
+def test_an_ascribed_lambda_parameter_scopes_its_name_and_its_type_apart():
     # (lambda ((ascribe# x @int)) x) scopes `x` exactly as a bare parameter
-    # would, at {951}. The type operand is not a binder and not a reference,
-    # so it stays bare: it denotes a type, and nothing resolves it.
+    # would, at {951}. The type operand is a region of its own and takes the
+    # next scope, {952} — which is what keeps a type variable bound inside it
+    # from ever being the same binder as a term variable of one identifier.
+    #
+    # `@int` is a constructor rather than a variable, so nothing resolves it;
+    # it carries the operand's scope only because the scope covers the whole
+    # operand.
     expanded = expand(read("(lambda ((ascribe# x @int)) x)"), fresh=counter(951))
 
     binder = Symbol("x", {Scope(951)})
     assert expanded == SList(
         [
             Symbol("lambda"),
-            SList([SList([Symbol("ascribe#"), binder, Symbol("@int")])]),
+            SList([SList([Symbol("ascribe#"), binder, Symbol("@int", {Scope(952)})])]),
             binder,
         ]
     )
 
 
-def test_an_ascribed_letrec_binder_scopes_only_its_name():
+def test_an_ascribed_letrec_binder_scopes_its_name_and_its_type_apart():
     # The letrec region covers the initializer as well as the body, so both
-    # carry {952}; the type operand stays bare there too.
+    # carry {952}; the type operand takes its own scope, {953}, as it does in a
+    # lambda parameter.
     expanded = expand(read("(letrec (((ascribe# n @int) 5)) n)"), fresh=counter(952))
 
     binder = Symbol("n", {Scope(952)})
@@ -220,7 +287,7 @@ def test_an_ascribed_letrec_binder_scopes_only_its_name():
                                 [
                                     Symbol("ascribe#"),
                                     binder,
-                                    Symbol("@int"),
+                                    Symbol("@int", {Scope(953)}),
                                 ]
                             ),
                             Integer(5),
@@ -267,12 +334,15 @@ def test_a_define_binder_mints_no_scope():
 
 
 def test_an_ascribed_define_binder_keeps_its_wrapper():
+    # A declaration mints no scope for its binder, so the type operand's is the
+    # first this expansion mints: the name stays bare and the operand takes
+    # {961}.
     expanded = expand(read("(define (ascribe# f @int) 5)"), fresh=counter(961))
 
     assert expanded == SList(
         [
             Symbol("define"),
-            SList([Symbol("ascribe#"), Symbol("f"), Symbol("@int")]),
+            SList([Symbol("ascribe#"), Symbol("f"), Symbol("@int", {Scope(961)})]),
             Integer(5),
         ]
     )
@@ -314,3 +384,106 @@ def test_an_ascribed_pattern_variable_is_refused():
 
     with pytest.raises(ExpandError):
         expand(read(source), fresh=counter(966))
+
+
+# -- type binders ----------------------------------------------------------------
+
+
+def test_a_recursive_type_scopes_its_variable_over_its_body():
+    # `@mu` binds exactly as `forall#` does, with one scope for the form: {971}
+    # is the type operand's and {972} the `@mu`'s, which its body carries and
+    # its binder joins by union.
+    expanded = expand(
+        read("(lambda ((ascribe# xs (@mu a (@list a)))) xs)"), fresh=counter(970)
+    )
+
+    binder = Symbol("xs", {Scope(970)})
+    bound = Symbol("a", {Scope(971), Scope(972)})
+    assert expanded == SList(
+        [
+            Symbol("lambda"),
+            SList(
+                [
+                    SList(
+                        [
+                            Symbol("ascribe#"),
+                            binder,
+                            SList(
+                                [
+                                    Symbol("@mu", {Scope(971)}),
+                                    bound,
+                                    SList(
+                                        [
+                                            Symbol("@list", {Scope(971), Scope(972)}),
+                                            bound,
+                                        ]
+                                    ),
+                                ]
+                            ),
+                        ]
+                    )
+                ]
+            ),
+            binder,
+        ]
+    )
+
+
+def test_nested_type_binders_of_one_identifier_are_distinct():
+    # The payoff of scoping type variables: an inner binder reusing an outer
+    # identifier is a distinct binder, told apart by its scope set rather than
+    # by overwriting an entry in a set of identifiers. The occurrence carries
+    # both, so `resolve` takes the inner one — and the outer's set is also a
+    # subset of the inner's, which keeps the candidates a chain and the choice
+    # unambiguous.
+    expanded = expand(
+        read("(lambda ((ascribe# x (@mu a (@prod (@mu a (@prod a)))))) x)"),
+        fresh=counter(975),
+    )
+
+    match expanded:
+        case SList([_, SList([SList([_, _, outer_mu])]), _]):
+            pass
+        case _:
+            raise AssertionError(f"not an ascribed lambda: {expanded}")
+
+    match outer_mu:
+        case SList([_, outer, SList([_, inner_mu])]):
+            pass
+        case _:
+            raise AssertionError(f"not an outer @mu: {outer_mu}")
+
+    match inner_mu:
+        case SList([_, inner, SList([_, occurrence])]):
+            pass
+        case _:
+            raise AssertionError(f"not an inner @mu: {inner_mu}")
+
+    assert outer.identifier == inner.identifier == "a"
+    assert outer != inner
+    assert outer.scopes < inner.scopes
+    assert inner.scopes <= occurrence.scopes
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # A quantifier binding one identifier twice: both binding sites would
+        # share the quantifier's single scope and so be indistinguishable, which
+        # is the refusal `checked` makes of a lambda's parameters.
+        "(lambda ((ascribe# f (forall# (a a) a))) f)",
+        # Every `@` identifier is a type constructor's, so one names no
+        # variable. Refused before any binder is registered for it.
+        "(lambda ((ascribe# x (@mu @int (@list @int)))) x)",
+        "(lambda ((ascribe# f (forall# (@int) @int))) f)",
+        # A type variable is minted through the one minting path, so it takes
+        # the refusals a term binder takes — including the core-form
+        # identifiers, which no type needs.
+        "(lambda ((ascribe# x (@mu lambda (@list lambda)))) x)",
+        # A binder position that is not a symbol at all.
+        "(lambda ((ascribe# x (@mu (a) (@list a)))) x)",
+    ],
+)
+def test_malformed_type_binders_are_refused(source: str):
+    with pytest.raises(ExpandError):
+        expand(read(source))

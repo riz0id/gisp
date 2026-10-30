@@ -5,7 +5,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from Expander import expand, parse
+from Expander import ParseError, expand, parse
 from Reader import read
 from Resolve import BindingTable, bindings
 from Syntax import Expr, Integer, Scope, Symbol
@@ -214,7 +214,6 @@ def test_an_operand_count_off_the_product_is_refused():
 
 
 def test_an_unascribed_application_head_is_refused():
-    # `len` is polymorphic, so `Context.default()` cannot ascribe it.
     program, table = program_of("(len 5)", 1430)
 
     with pytest.raises(TypeCheckError):
@@ -347,6 +346,10 @@ def test_a_shadowed_list_spelling_does_not_construct_a_list():
 
 # -- list selectors ---------------------------------------------------------------
 
+# `head` and `tail` are ascribed schemes in `Context.default()` rather than
+# special-cased. Each writes its quantified variable into its result, so the
+# checked type names the instance and nothing has to be synthesized.
+
 
 def test_head_checks_its_operand_at_a_list_of_the_checked_type():
     program, table = program_of("(head (list 1 2))", 1460)
@@ -407,6 +410,8 @@ def test_the_selectors_take_one_argument():
 def test_a_shadowed_selector_spelling_is_an_ordinary_application():
     # The binder spelled `head` captures the body's head, so the application
     # reads through the binder's ascription rather than selecting from a list.
+    # A shadowing binder is a scoped symbol, which is in neither namespace of
+    # the store until `abstraction` registers it.
     program, table = program_of("(lambda (head) (head 1))", 1469)
     ty = FunType(
         return_type=IntType(),
@@ -414,6 +419,130 @@ def test_a_shadowed_selector_spelling_is_an_ordinary_application():
     )
 
     TypeChecker(table=table).check(program, ty)
+
+
+# -- polymorphism: instantiation from the checked type ----------------------------
+
+
+def test_cons_instantiates_at_several_element_types():
+    for source, element in [
+        ("(. 1 (list 2))", IntType()),
+        ("(. #t (list #f))", BoolType()),
+        (r"(. #\a (list #\b))", CharType()),
+    ]:
+        program, table = program_of(source, 1600)
+        TypeChecker(table=table).check(program, ListType(element))
+
+
+def test_cons_refuses_an_element_off_the_list():
+    program, table = program_of("(. 1 (list #t))", 1601)
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table).check(program, ListType(IntType()))
+
+
+def test_cons_builds_a_list_of_lists():
+    # The instance is read off the checked type whatever its sort, so a compound
+    # one instantiates as readily as a ground one.
+    program, table = program_of("(. (list 1) (list (list 2)))", 1602)
+
+    TypeChecker(table=table).check(program, ListType(ListType(IntType())))
+
+
+def test_a_polymorphic_builtin_is_not_checkable_as_a_reference():
+    # A scheme is instantiated where its binder is applied, so naming one
+    # without applying it is refused — at the function type it would have at an
+    # instance as readily as at any other.
+    program, table = program_of("head", 1603)
+    ty = FunType(
+        return_type=IntType(),
+        argument_type=ProdType([ListType(IntType())]),
+    )
+
+    for checked in [ty, IntType()]:
+        with pytest.raises(TypeCheckError):
+            TypeChecker(table=table).check(program, checked)
+
+
+# -- polymorphism: compound and quantified ascriptions ----------------------------
+
+
+def test_a_binder_can_be_ascribed_a_compound_type():
+    program, table = program_of(
+        "(letrec (((ascribe# xs (@list @int)) (list 1))) xs)", 1640
+    )
+
+    TypeChecker(table=table).check(program, ListType(IntType()))
+
+
+def test_a_compound_ascription_off_its_initializer_is_refused():
+    program, table = program_of(
+        "(letrec (((ascribe# xs (@list @int)) (list #t))) xs)", 1641
+    )
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table).check(program, ListType(IntType()))
+
+
+def test_a_parameter_cannot_be_ascribed_a_quantified_type():
+    # A parameter's type is fixed by the position it sits in, so a quantifier
+    # over it would bind variables no use could instantiate.
+    source = "(lambda ((ascribe# f (forall# (a) (@fun (@prod a) a)))) f)"
+    program, table = program_of(source, 1642)
+    ty = unary(unary(IntType(), IntType()), unary(IntType(), IntType()))
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table).check(program, ty)
+
+
+def test_a_declared_polymorphic_binder_is_used_at_two_instances():
+    # The headline behavior: one `define` checked once, used at two different
+    # instances. The body is checked against the scheme's body with `a` abstract,
+    # so the one check stands for every instance a use reads off.
+    identity = "(define (ascribe# id (forall# (a) (@fun (@prod a) a))) (lambda (x) x))"
+    program, table = program_of(identity, 1643)
+    checker = TypeChecker(table=table)
+    checker.declaration(program)
+
+    for source, ty in [("(id 1)", IntType()), ("(id #t)", BoolType())]:
+        use, uses = program_of(source, 1644)
+        TypeChecker(table=uses, store=checker.store).check(use, ty)
+
+
+def test_a_polymorphic_body_cannot_assume_an_instance():
+    # `a` is abstract while the body is checked, so nothing constructs it: a
+    # literal returned from a function claiming to return any `a` is refused.
+    source = "(define (ascribe# f (forall# (a) (@fun (@prod a) @int))) (lambda (x) x))"
+    program, table = program_of(source, 1645)
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table).declaration(program)
+
+
+def test_a_literal_does_not_inhabit_an_abstract_variable():
+    # The crash this guards: `is_constructor` answers `False` for an abstract
+    # variable rather than resolving it, so this is a `TypeCheckError` and not a
+    # `ValueError` escaping from the type queries.
+    source = "(define (ascribe# f (forall# (a) (@fun (@prod a) a))) (lambda (x) 5))"
+    program, table = program_of(source, 1646)
+
+    with pytest.raises(TypeCheckError):
+        TypeChecker(table=table).declaration(program)
+
+
+def test_a_polymorphic_declaration_passes_its_variable_through():
+    # What a polymorphic body *can* do: return its argument, and apply another
+    # scheme at the abstract variable.
+    source = (
+        "(define (ascribe# first (forall# (a) (@fun (@prod (@list a)) a)))"
+        " (lambda (xs) (head xs)))"
+    )
+    program, table = program_of(source, 1647)
+    checker = TypeChecker(table=table)
+    checker.declaration(program)
+
+    use, uses = program_of("(first (list 1 2))", 1648)
+    TypeChecker(table=uses, store=checker.store).check(use, IntType())
 
 
 # -- tuple products ---------------------------------------------------------------
@@ -545,12 +674,12 @@ def test_every_nullary_type_can_be_ascribed():
 
 
 def test_an_unrecognized_ascribed_type_is_refused():
-    # Compound types have no surface parser yet, so a bare `@list` names no
-    # type. `nullary_type_of` refuses it, and that arrives as a type error.
-    program, table = program_of("(letrec (((ascribe# n @list) 5)) n)", 1488)
-
-    with pytest.raises(TypeCheckError):
-        TypeChecker(table=table).check(program, IntType())
+    # `@list` is a type constructor, and a constructor is written as a list:
+    # `(@list @int)` is a type and a bare `@list` is not. That is a question
+    # about written form, so the parse phase refuses it and the checker is never
+    # handed the program — where this once arrived as a type error.
+    with pytest.raises(ParseError):
+        program_of("(letrec (((ascribe# n @list) 5)) n)", 1488)
 
 
 def test_an_ascribed_char_parameter_checks_at_char():

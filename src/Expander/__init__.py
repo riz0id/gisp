@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from Expander.Parse import ParseError, parse, parse_type, strip
+from Expander.Parse import ParseError, parse, strip, type_syntax
 from Resolve import Binding, BindingTable, Phase, Unbound, resolve
 from Syntax import (
     Boolean,
@@ -21,8 +21,8 @@ __all__: list[str] = [
     "ParseError",
     "expand",
     "parse",
-    "parse_type",
     "strip",
+    "type_syntax",
 ]
 
 KEYWORDS: frozenset[str] = frozenset(
@@ -32,7 +32,6 @@ KEYWORDS: frozenset[str] = frozenset(
         "letrec-syntax",
         "syntax-rules",
         "if",
-        "choice",
         "quote",
         "define",
         "ascribe#",
@@ -125,13 +124,6 @@ def expand_expr(expr: Expr, state: Expansion) -> Expr:
             raise ExpandError(f"define outside the top level: {expr}")
         case SList([Symbol() as head, *_]) if head.identifier == "if":
             return expand_if(expr, state)
-        case SList([Symbol() as head, *_]) if head.identifier == "choice":
-            return expand_choice(expr, state)
-        case SList([Symbol() as head, *_]) if head.identifier in {"lchoice", "rchoice"}:
-            # Marker spellings are reserved for the Taylor expansion's own
-            # output; a source list wearing one would be misread as a marker
-            # by every recognizer downstream.
-            raise ExpandError(f"reserved marker spelling: {expr}")
         case SList() if heads_ascribe(expr):
             # Ascription annotates a binder and is consumed at the binding
             # form that holds it, so one reaching expression position is
@@ -234,23 +226,116 @@ def toplevel_binder(symbol: Expr, seen: set[str], state: Expansion) -> Symbol:
     return bound
 
 
-def binder_position(parameter: Expr, register: Callable[[Expr], Symbol]) -> Expr:
-    # A binder position is either a bare symbol or an `ascribe#`-wrapped one.
-    # Only the name is a binder: the type operand is an opaque type-level
-    # spelling and not a program identifier, so it never reaches `register`,
-    # acquires no scope, and is registered nowhere. `ascribe#` is a keyword,
-    # so the wrapper cannot be mistaken for a binder a macro built.
+def type_variable(
+    symbol: Expr, scope: Scope, seen: set[str], state: Expansion
+) -> Symbol:
+    # A type variable bound by `@mu` or `forall#`, minted through `binder` like
+    # every other binder: one minting path, so a type binder takes the refusals
+    # a term binder takes and is registered the same way.
     #
-    # How a binder is minted is the caller's business, passed in as
-    # `register`, so every binding form reads this one shape in this one
-    # place.
+    # The one refusal of its own precedes that, because it has to: every `@`
+    # identifier is a type constructor's, so one never names a variable, and
+    # catching it here keeps a binder from being registered for it.
+    match symbol:
+        case Symbol() as written if written.identifier.startswith("@"):
+            raise ExpandError(f"not a type variable: {symbol}")
+        case _:
+            return binder(symbol, scope, seen, state)
+
+
+def type_form(ty: Expr, state: Expansion) -> Expr:
+    # A written type, descended into for its binding positions alone. `@mu` and
+    # `forall#` bind type variables, so each opens a region and mints one scope
+    # for it exactly as `expand_lambda` and `expand_letrec` do.
+    #
+    # Nothing here reads a type for its meaning. Whether an identifier names a
+    # type constructor, whether a form is written at the right arity, and what
+    # the type denotes are all later questions. This pass settles only where the
+    # binders are, which is the one thing no later phase can recover once the
+    # scopes are missing.
+    match ty:
+        case SList([Symbol() as head, variable, body]) if head.identifier == "@mu":
+            # One scope for the whole form: the variable is the binding position
+            # and the body is the region, so the body acquires the scope before
+            # the descent and the binder acquires it by union.
+            scope: Scope = state.fresh()
+            body.add(scope)
+
+            return SList(
+                [
+                    head,
+                    type_variable(variable, scope, set(), state),
+                    type_form(body, state),
+                ]
+            )
+        case SList([Symbol() as head, SList(variables), body]) if (
+            head.identifier == "forall#"
+        ):
+            # As above, with `seen` shared across the variable list because
+            # those are the binders of one form.
+            quantifier: Scope = state.fresh()
+            seen: set[str] = set()
+            body.add(quantifier)
+
+            return SList(
+                [
+                    head,
+                    SList(
+                        [
+                            type_variable(variable, quantifier, seen, state)
+                            for variable in variables
+                        ]
+                    ),
+                    type_form(body, state),
+                ]
+            )
+        case SList(items):
+            # Not a binding form, and not necessarily a well-formed one either:
+            # a `@mu` or `forall#` at the wrong arity falls here and is descended
+            # into as an ordinary list, leaving the written form to the phase
+            # whose business it is.
+            return SList([type_form(item, state) for item in items])
+        case _:
+            # A symbol or a datum, re-emitted by identity rather than rebuilt:
+            # the scope passes mutate in place, and an enclosing invocation's
+            # flip has to reach the symbols a type operand holds.
+            return ty
+
+
+def expand_type(ty: Expr, state: Expansion) -> Expr:
+    # An `ascribe#` form's type operand. The operand is a region of its own and
+    # takes one scope for the whole of it, minted here by this occurrence as
+    # every other scope is minted by its own form's. Every type variable bound
+    # within the operand therefore carries it and no term binder ever does,
+    # which is what keeps a type variable and a term variable of one identifier
+    # from being the same binder.
+    scope: Scope = state.fresh()
+    ty.add(scope)
+
+    return type_form(ty, state)
+
+
+def binder_position(
+    parameter: Expr,
+    register: Callable[[Expr], Symbol],
+    ascribed: Callable[[Expr], Expr],
+) -> Expr:
+    # A binder position is either a bare symbol or an `ascribe#`-wrapped one.
+    # Only the name is a binder of the enclosing form; the type operand is a
+    # type, and its own binding positions are the `ascribed` pass's to scope.
+    # `ascribe#` is a keyword, so the wrapper cannot be mistaken for a binder a
+    # macro built.
+    #
+    # How a binder is minted and how a type operand is scoped are both the
+    # caller's business, passed in, so every binding form reads this one shape
+    # in this one place and this function holds no state of its own.
     match parameter:
-        case SList([head, *_]) if (ascribed := ascription(parameter)) is not None:
-            name, ty = ascribed
+        case SList([head, *_]) if (declared := ascription(parameter)) is not None:
+            name, ty = declared
             # The head is re-emitted exactly as it arrived, scopes and all: a
             # macro-introduced ascription carries the scopes of wherever it
             # was written, and rebuilding it bare would discard them.
-            return SList([head, register(name), ty])
+            return SList([head, register(name), ascribed(ty)])
         case _ if heads_ascribe(parameter):
             # Caught here rather than below so a wrong-arity or non-symbol
             # triple reads as the malformed ascription it is.
@@ -279,7 +364,11 @@ def expand_lambda(expr: SList, state: Expansion) -> Expr:
             head,
             SList(
                 [
-                    binder_position(parameter, lambda s: binder(s, scope, seen, state))
+                    binder_position(
+                        parameter,
+                        lambda s: binder(s, scope, seen, state),
+                        lambda t: expand_type(t, state),
+                    )
                     for parameter in parameters
                 ]
             ),
@@ -311,7 +400,9 @@ def expand_letrec(expr: SList, state: Expansion) -> Expr:
                     SList(
                         [
                             binder_position(
-                                name, lambda s: binder(s, scope, seen, state)
+                                name,
+                                lambda s: binder(s, scope, seen, state),
+                                lambda t: expand_type(t, state),
                             ),
                             expand_expr(initializer, state),
                         ]
@@ -547,27 +638,6 @@ def expand_if(expr: SList, state: Expansion) -> Expr:
     )
 
 
-def expand_choice(expr: SList, state: Expansion) -> Expr:
-    match expr.items:
-        case [Symbol() as head, Integer() as p, Integer() as q, left, right]:
-            pass
-        case _:
-            raise ExpandError(f"malformed choice: {expr}")
-
-    # Not a binding form, like if: both branches stay in the enclosing
-    # region. The numerals are notation read by the Taylor expansion, not
-    # data flowing through the program, so they pass through unexpanded.
-    return SList(
-        [
-            head,
-            p,
-            q,
-            expand_expr(left, state),
-            expand_expr(right, state),
-        ]
-    )
-
-
 def expand_quote(expr: SList) -> Expr:
     match expr.items:
         case [Symbol(), _]:
@@ -588,6 +658,10 @@ def expand_define(expr: Expr, state: Expansion) -> Expr:
     # before the initializer expands, which is what lets a defined procedure
     # refer to itself.
     seen: set[str] = set()
-    bound: Expr = binder_position(name, lambda s: toplevel_binder(s, seen, state))
+    bound: Expr = binder_position(
+        name,
+        lambda s: toplevel_binder(s, seen, state),
+        lambda t: expand_type(t, state),
+    )
 
     return SList([head, bound, expand_expr(init, state)])
