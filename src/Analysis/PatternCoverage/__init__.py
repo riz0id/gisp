@@ -14,6 +14,7 @@ __all__: list[str] = [
     "clause_pattern",
     "clauses",
     "coverage",
+    "probing",
 ]
 
 

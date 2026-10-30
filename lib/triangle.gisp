@@ -1,0 +1,11 @@
+(define (ascribe# triangle (@fun (@prod @int @int @int) @int))
+  (lambda ((ascribe# x @int) (ascribe# y @int) (ascribe# z @int))
+    (match (lt x y)
+      ((#t (prod#)) (match (lt x z)
+                      ((#t (prod#)) x)
+                      ((#f (prod#)) z)))
+      ((#f (prod#)) (match (lt y z)
+                      ((#t (prod#)) y)
+                      ((#f (prod#)) z))))))
+
+(triangle 3 1 2)

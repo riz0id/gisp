@@ -2,7 +2,7 @@ from collections.abc import Callable
 from itertools import count
 
 from Analysis import conditions
-from Analysis.CExpr import ComparisonCExpr, IntegerCExpr, ListCExpr, VarCExpr
+from Analysis.CExpr import AppCExpr, ComparisonCExpr, IntegerCExpr, ListCExpr, VarCExpr
 from Expander import expand, parse
 from Reader import read
 from Resolve import bindings
@@ -54,7 +54,7 @@ def test_the_whole_test_is_returned_not_the_occurrence():
 
     # Both parameters are binders of one form, so both carry its one scope.
     assert conditions(Symbol("x", {Scope(0)}), program, table) == [
-        ListCExpr([Symbol("f", {Scope(0)}), Symbol("x", {Scope(0)})])
+        AppCExpr(Symbol("f", {Scope(0)}), [VarCExpr(Symbol("x", {Scope(0)}))])
     ]
 
 
@@ -97,7 +97,7 @@ def test_a_letrec_bound_application_is_returned_whole():
     table = bindings(program)
 
     assert conditions(Symbol("x", {Scope(0)}), program, table) == [
-        ListCExpr([Symbol("f", {Scope(0)}), Symbol("x", {Scope(0)})])
+        AppCExpr(Symbol("f", {Scope(0)}), [VarCExpr(Symbol("x", {Scope(0)}))])
     ]
 
 
@@ -116,7 +116,7 @@ def test_a_letrec_initializer_and_body_are_both_regions():
     # regions; the initializer's test comes before the body's.
     assert conditions(Symbol("f", {Scope(0)}), program, table) == [
         VarCExpr(Symbol("f", {Scope(0)})),
-        ListCExpr([Symbol("f", {Scope(0)}), Integer(3)]),
+        AppCExpr(Symbol("f", {Scope(0)}), [IntegerCExpr(Integer(3))]),
     ]
 
 
@@ -319,8 +319,8 @@ def test_sibling_conditions_come_out_in_source_order():
     table = bindings(program)
 
     assert conditions(Symbol("x", {Scope(0)}), program, table) == [
-        ListCExpr([Symbol("g", {Scope(0)}), Symbol("x", {Scope(0)})]),
-        ListCExpr([Symbol("h", {Scope(0)}), Symbol("x", {Scope(0)})]),
+        AppCExpr(Symbol("g", {Scope(0)}), [VarCExpr(Symbol("x", {Scope(0)}))]),
+        AppCExpr(Symbol("h", {Scope(0)}), [VarCExpr(Symbol("x", {Scope(0)}))]),
     ]
 
 

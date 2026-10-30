@@ -12,9 +12,20 @@ from Analysis import (
     unreachable,
 )
 from Analysis.CExpr import CExprError
+from Analysis.Measure import probability
 from Analysis.Path import Path
 from Analysis.PatternCoverage import Coverage, CoverageError
 from Analysis.Support import Support
+from Analysis.Walk import (
+    Branch,
+    Procedure,
+    Summary,
+    applied,
+    elements,
+    procedures,
+    summaries,
+    weight,
+)
 from Evaluate import BUILTINS, Environment, EvalError, evaluate_toplevel
 from Expander import ExpandError, ParseError, expand, parse
 from Reader import ReadError, read_all
@@ -157,8 +168,128 @@ def report_coverage(path: Path, verdict: Coverage | None) -> None:
         print(f"  match at {path}: leaves {verdict.witness} unmatched")
 
 
+def ordering(branch: Branch) -> str:
+    # What a branch committed its class's ground binders to, as the
+    # comparisons that said so.
+    #
+    # The ordering and not the guards. The ordering is the whole of what
+    # decides which value of a class takes the branch, and is short enough to
+    # read — a class binds as many elements as its clauses named, which is two
+    # or three, not as many as an input has.
+    #
+    # One line per pair, and the strict reading where a pair was compared both
+    # ways.
+    strictest: dict[tuple[Symbol, Symbol], bool] = {}
+
+    for edge in branch.constraints.order:
+        pair: tuple[Symbol, Symbol] = (edge.lesser, edge.greater)
+        strictest[pair] = strictest.get(pair, False) or edge.strict
+
+    return ", ".join(
+        f"{lesser}{'<' if strict else '<='}{greater}"
+        for (lesser, greater), strict in strictest.items()
+    )
+
+
+def elided(expr: object, width: int = 56) -> str:
+    # `expr` written out, cut to a width it can be read at. The cut is marked,
+    # so a long answer can be told from a complete one.
+    written: str = str(expr)
+
+    return written if len(written) <= width else f"{written[: width - 1]}…"
+
+
+def report_branch(branch: Branch, over: tuple[Symbol, ...]) -> None:
+    share: float | None = probability(weight(branch, over), over)
+    said: list[str] = ["p ?" if share is None else f"p {share:.4f}"]
+    taken: str = ordering(branch)
+
+    if taken:
+        said.append(elided(taken))
+
+    print(f"      {': '.join(said)} -> {elided(branch.result.to_value())}")
+
+
+def report_summary(summary: Summary) -> None:
+    # Every way one procedure's data can move, by the class its argument is in.
+    #
+    # Said of the procedure and not of a call, which is what makes this finite:
+    # a recursive call appears in a result as `<name@classes>`, a reference to
+    # this very table, rather than as a walk followed into. So there is no
+    # count of walks to cap here and nothing to report as truncated.
+    written: tuple[str, ...] = tuple(
+        parameter.identifier for parameter in summary.parameters
+    )
+
+    print(f"procedure {summary.procedure} ({', '.join(written)})")
+
+    for key, branches in summary.branches.items():
+        named: str = " ".join(
+            str(summary.classes[position][index]) for position, index in enumerate(key)
+        )
+        # The indices this line is addressed by, written as a reference writes
+        # them: one per parameter, in order. `<append@0,1 1>` in a result stands
+        # for the two lines headed `class 0 1` and `class 1 1`, and without the
+        # index here there is nothing those digits could be read against.
+        at: str = " ".join(str(index) for index in key)
+        over: tuple[Symbol, ...] = elements(branches)
+
+        print(f"  class {at}: {named}")
+
+        for branch in branches:
+            report_branch(branch, over)
+
+
+def report_application(
+    form: Expr,
+    table: BindingTable,
+    store: Context,
+    known: dict[Symbol, Procedure],
+    summarised: dict[Symbol, Summary | None],
+) -> None:
+    # Which of a procedure's classes a form's arguments fall in.
+    #
+    # All a report says about an expression, and all there is to say: the walks
+    # are the procedure's and were given above, so a call adds only which of
+    # them it reaches. `'(1)` and `'(3 1 4 1 5 9 2 6)` are both a `cons`, which
+    # is why this says the same of either.
+    found: tuple[Symbol, tuple[tuple[int, ...], ...]] | None = applied(
+        form, table, store, known
+    )
+
+    if found is None:
+        return
+
+    binder, indices = found
+    summary: Summary | None = summarised.get(binder)
+
+    if summary is None:
+        return
+
+    for position, reached in enumerate(indices):
+        parameter: Symbol = summary.parameters[position]
+        named: str = " or ".join(
+            str(summary.classes[position][index]) for index in reached
+        )
+
+        print(f"  applies {binder} with {parameter} in {named or 'no class'}")
+
+
 def report_analysis(source: str, store: Context) -> None:
-    for index, (program, table) in enumerate(analysed(source, store)):
+    forms: list[tuple[Expr, BindingTable]] = analysed(source, store)
+    known: dict[Symbol, Procedure] = procedures(forms, store)
+    summarised: dict[Symbol, Summary | None] = summaries(forms, store)
+
+    # The procedures first and once each, because that is where the walks are.
+    # A form that applies one adds only which of its classes it reaches.
+    for binder in known:
+        summary: Summary | None = summarised[binder]
+
+        if summary is not None:
+            report_summary(summary)
+            print()
+
+    for index, (program, table) in enumerate(forms):
         free: list[Symbol] = opaque(program, table)
         branches: list[Path] = arms(program)
 
@@ -172,6 +303,8 @@ def report_analysis(source: str, store: Context) -> None:
 
         for path, verdict in coverages(program, table, store):
             report_coverage(path, verdict)
+
+        report_application(program, table, store, known, summarised)
 
         if not branches:
             # Said rather than left blank: a form with no `match` in it is one

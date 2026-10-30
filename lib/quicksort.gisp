@@ -1,5 +1,4 @@
-(define (ascribe# append
-                  (@fun (@prod (@list @int) (@list @int)) (@list @int)))
+(define (ascribe# append (@fun (@prod (@list @int) (@list @int)) (@list @int)))
   (lambda ((ascribe# xs (@list @int)) (ascribe# ys (@list @int)))
     (match xs
       ((nil (prod#)) ys)

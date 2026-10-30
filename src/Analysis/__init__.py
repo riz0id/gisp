@@ -3,6 +3,7 @@ from enum import Enum, StrEnum, auto
 from typing import Final
 
 from Analysis.CExpr import (
+    AppCExpr,
     CExpr,
     CharCExpr,
     ComparisonCExpr,
@@ -10,7 +11,6 @@ from Analysis.CExpr import (
     DisjunctionCExpr,
     EquivalenceCExpr,
     IntegerCExpr,
-    ListCExpr,
     NegationCExpr,
     VarCExpr,
 )
@@ -28,7 +28,6 @@ from Resolve import BindingTable, meaning
 from Syntax import Expr, Integer, SList, Symbol, binder_name
 from Syntax.Type import (
     BOOL,
-    CONSTRUCTORS,
     FALSE,
     TRUE,
     CharType,
@@ -530,10 +529,6 @@ def comparison(relation: Relation, polarity: bool, bound: int) -> Support:
 GROUNDS: Final[tuple[Type, ...]] = (IntType(), CharType(), BOOL)
 
 
-def constructs(head: Symbol, table: BindingTable) -> bool:
-    return meaning(head, table) in CONSTRUCTORS
-
-
 def ascription(operand: CExpr, context: Context, table: BindingTable) -> Type | None:
     match operand:
         case IntegerCExpr():
@@ -552,7 +547,12 @@ def ascription(operand: CExpr, context: Context, table: BindingTable) -> Type | 
             | NegationCExpr()
         ):
             return BOOL
-        case ListCExpr([Symbol() as head, *_]) if not constructs(head, table):
+        case AppCExpr(head=head):
+            # An application, and so the return type of whatever is applied. A
+            # construction is no longer this node, so there is no constructor to
+            # exclude by name here: `(cons (prod# x xs))` is a `ConCExpr` and
+            # falls to the last arm, which is the right answer — a list has no
+            # ascription to read and nothing below asks for one.
             applied: Symbol = meaning(head, table)
 
             if applied not in context:
@@ -630,14 +630,15 @@ def satisfying(
             rights: Support = satisfying(right, target, table, polarity, context)
 
             return lefts.union(rights) if polarity else lefts.intersection(rights)
-        case ListCExpr([Symbol() as head, left_operand, right_operand]):
+        case AppCExpr(head=head, operands=[lhs, rhs]):
+            # `le` read as the disjunction it is, so one reading of `lt` and
+            # `eq` serves it too. The operands are already conditions —
+            # `AppCExpr` converts them, where `ListCExpr` held them as syntax
+            # and this arm had to convert them again.
             builtin: Symbol = meaning(head, table)
 
             if builtin.scopes or builtin.identifier != "le":
                 return Support.integers()
-
-            lhs: CExpr = CExpr.from_expr(left_operand, table)
-            rhs: CExpr = CExpr.from_expr(right_operand, table)
 
             return satisfying(
                 DisjunctionCExpr(

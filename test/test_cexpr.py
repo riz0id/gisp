@@ -2,15 +2,18 @@ from collections.abc import Callable
 from itertools import count
 
 from Analysis.CExpr import (
+    AppCExpr,
     CExpr,
     CharCExpr,
     ComparisonCExpr,
+    ConCExpr,
     ConjunctionCExpr,
     DisjunctionCExpr,
     EquivalenceCExpr,
     IntegerCExpr,
     ListCExpr,
     NegationCExpr,
+    ProductCExpr,
     VarCExpr,
 )
 from Expander import expand, parse
@@ -123,24 +126,25 @@ def test_a_shadowed_built_in_is_an_application():
 
     # The parameter outranks the bare built-in binder, so the head names a
     # variable and the form is the application it looks like.
-    assert CExpr.from_expr(expr, store) == ListCExpr(
-        [Symbol("and", {Scope(0)}), Symbol("#t"), Symbol("#f")]
+    assert CExpr.from_expr(expr, store) == AppCExpr(
+        Symbol("and", {Scope(0)}), [VarCExpr(Symbol("#t")), VarCExpr(Symbol("#f"))]
     )
 
 
 def test_a_letrec_bound_built_in_is_an_application():
     expr, store = body("(letrec ((eq 1)) (eq 2 3))")
 
-    assert CExpr.from_expr(expr, store) == ListCExpr(
-        [Symbol("eq", {Scope(0)}), Integer(2), Integer(3)]
+    assert CExpr.from_expr(expr, store) == AppCExpr(
+        Symbol("eq", {Scope(0)}),
+        [IntegerCExpr(Integer(2)), IntegerCExpr(Integer(3))],
     )
 
 
 def test_a_shadowed_negation_is_an_application():
     expr, store = body("(lambda (not) (not #t))")
 
-    assert CExpr.from_expr(expr, store) == ListCExpr(
-        [Symbol("not", {Scope(0)}), Symbol("#t")]
+    assert CExpr.from_expr(expr, store) == AppCExpr(
+        Symbol("not", {Scope(0)}), [VarCExpr(Symbol("#t"))]
     )
 
 
@@ -148,53 +152,152 @@ def test_an_over_applied_built_in_is_an_application():
     # Each built-in form has one arity, so a longer list is not one of them.
     expr = program("(and #t #f #t)")
 
-    assert CExpr.from_expr(expr, bindings(expr)) == ListCExpr(
-        [Symbol("and"), Symbol("#t"), Symbol("#f"), Symbol("#t")]
+    assert CExpr.from_expr(expr, bindings(expr)) == AppCExpr(
+        Symbol("and"),
+        [VarCExpr(Symbol("#t")), VarCExpr(Symbol("#f")), VarCExpr(Symbol("#t"))],
     )
 
 
 def test_an_under_applied_built_in_is_an_application():
     expr = program("(and #t)")
 
-    assert CExpr.from_expr(expr, bindings(expr)) == ListCExpr(
-        [Symbol("and"), Symbol("#t")]
+    assert CExpr.from_expr(expr, bindings(expr)) == AppCExpr(
+        Symbol("and"), [VarCExpr(Symbol("#t"))]
     )
 
 
 def test_an_over_applied_negation_is_an_application():
     expr = program("(not #t #f)")
 
-    assert CExpr.from_expr(expr, bindings(expr)) == ListCExpr(
-        [Symbol("not"), Symbol("#t"), Symbol("#f")]
+    assert CExpr.from_expr(expr, bindings(expr)) == AppCExpr(
+        Symbol("not"), [VarCExpr(Symbol("#t")), VarCExpr(Symbol("#f"))]
     )
 
 
 def test_an_under_applied_negation_is_an_application():
     expr = program("(not)")
 
-    assert CExpr.from_expr(expr, bindings(expr)) == ListCExpr([Symbol("not")])
+    assert CExpr.from_expr(expr, bindings(expr)) == AppCExpr(Symbol("not"), [])
 
 
 def test_an_unbound_head_is_an_application():
     expr = program("(f #t #f)")
 
-    assert CExpr.from_expr(expr, bindings(expr)) == ListCExpr(
-        [Symbol("f"), Symbol("#t"), Symbol("#f")]
+    assert CExpr.from_expr(expr, bindings(expr)) == AppCExpr(
+        Symbol("f"), [VarCExpr(Symbol("#t")), VarCExpr(Symbol("#f"))]
     )
 
 
-def test_an_application_keeps_its_operands_as_syntax():
-    # `ListCExpr` holds `Expr`, so conversion stops at the first head that is
-    # not a built-in: the comparison inside is left as the syntax it was.
+def test_an_applications_operands_are_converted_too():
+    # `AppCExpr` holds conditions and not syntax, so conversion reaches through
+    # an application into the operator forms within it. `ListCExpr` held an
+    # application's operands unread, and `Analysis.satisfying` had to convert
+    # them a second time to say anything about one.
     expr = program("(f (lt 1 2))")
 
-    assert CExpr.from_expr(expr, bindings(expr)) == ListCExpr(
-        [Symbol("f"), SList([Symbol("lt"), Integer(1), Integer(2)])]
+    assert CExpr.from_expr(expr, bindings(expr)) == AppCExpr(
+        Symbol("f"),
+        [ComparisonCExpr(IntegerCExpr(Integer(1)), IntegerCExpr(Integer(2)))],
     )
 
 
-def test_the_empty_list_is_an_application():
+def test_a_core_form_is_the_opaque_list_it_is():
+    # A keyword head is neither an operator, a construction, nor an
+    # application. A nested `match` in a scrutinee position is the clearest
+    # case: it has a value, but not one this language reads, and calling
+    # `match` a procedure applied to its clauses would be a worse answer than
+    # saying nothing.
+    expr = program("(match x ((#t (prod#)) 1) ((#f (prod#)) 2))")
+
+    assert CExpr.from_expr(expr, bindings(expr)) == ListCExpr(
+        [
+            Symbol("match"),
+            Symbol("x"),
+            SList([SList([Symbol("#t"), SList([Symbol("prod#")])]), Integer(1)]),
+            SList([SList([Symbol("#f"), SList([Symbol("prod#")])]), Integer(2)]),
+        ]
+    )
+
+
+def test_the_empty_list_has_no_head_to_read():
     assert CExpr.from_expr(SList([])) == ListCExpr([])
+
+
+# -- constructed data ----------------------------------------------------------
+
+
+def test_a_product_is_a_product_construction():
+    expr = program("(prod# 1 2)")
+
+    assert CExpr.from_expr(expr, bindings(expr)) == ProductCExpr(
+        Symbol("prod#"), [IntegerCExpr(Integer(1)), IntegerCExpr(Integer(2))]
+    )
+
+
+def test_the_empty_product_is_a_product_construction():
+    expr = program("(prod#)")
+
+    assert CExpr.from_expr(expr, bindings(expr)) == ProductCExpr(Symbol("prod#"), [])
+
+
+def test_a_sum_constructor_carries_one_payload():
+    # One payload and not a run of operands, as `SumType.cons` maps a
+    # constructor to a single type: the product written for that payload is
+    # what splits it into fields.
+    expr = program("(cons (prod# 1 (nil (prod#))))")
+
+    assert CExpr.from_expr(expr, bindings(expr)) == ConCExpr(
+        Symbol("cons"),
+        ProductCExpr(
+            Symbol("prod#"),
+            [
+                IntegerCExpr(Integer(1)),
+                ConCExpr(Symbol("nil"), ProductCExpr(Symbol("prod#"), [])),
+            ],
+        ),
+    )
+
+
+def test_a_boolean_is_a_sum_construction():
+    expr = program("(#t (prod#))")
+
+    assert CExpr.from_expr(expr, bindings(expr)) == ConCExpr(
+        Symbol("#t"), ProductCExpr(Symbol("prod#"), [])
+    )
+
+
+def test_a_shadowed_constructor_is_an_application():
+    # The parameter outranks the bare built-in binder, so the head names a
+    # variable — and a variable constructs nothing.
+    expr, store = body("(lambda (cons) (cons 1))")
+
+    assert CExpr.from_expr(expr, store) == AppCExpr(
+        Symbol("cons", {Scope(0)}), [IntegerCExpr(Integer(1))]
+    )
+
+
+def test_a_constructor_of_a_sum_the_program_wrote_is_an_application():
+    # `convert` is handed no type, and knowing `foo` constructs takes the type
+    # it belongs to. An application is the honest answer where nothing says
+    # otherwise; `Analysis.Shape` is the reader that has a type to ask.
+    expr = program("(foo (prod#))")
+
+    assert CExpr.from_expr(expr, bindings(expr)) == AppCExpr(
+        Symbol("foo"), [ProductCExpr(Symbol("prod#"), [])]
+    )
+
+
+def test_the_constructions_round_trip():
+    for source in ["(prod# 1 2)", "(prod#)", "(#t (prod#))", "(cons (prod# 1 2))"]:
+        expr = program(source)
+
+        assert CExpr.from_expr(expr, bindings(expr)).to_expr() == expr
+
+
+def test_an_application_round_trips():
+    expr = program("(f (lt 1 2) 3)")
+
+    assert CExpr.from_expr(expr, bindings(expr)).to_expr() == expr
 
 
 # -- leaves --------------------------------------------------------------------
